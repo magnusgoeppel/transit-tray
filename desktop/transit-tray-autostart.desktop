@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Transit
+Comment=Public transport departures from home in the panel
+Exec=/usr/bin/python3 @SCRIPT@
+Icon=transit-tray
+Terminal=false
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

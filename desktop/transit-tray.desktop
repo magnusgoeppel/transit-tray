@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Transit
+Comment=Departures from home and a route planner with map for public transport, bike, walking and car
+Exec=/usr/bin/python3 @SCRIPT@ --route
+Icon=transit-tray
+StartupWMClass=transit-tray
+Terminal=false
+StartupNotify=true
+Categories=Utility;
+Keywords=transit;public transport;departures;timetable;route;map;traffic;bus;tram;train;öffis;fahrplan;abfahrt;haltestelle;karte;
+Actions=home;
+
+[Desktop Action home]
+Name=Home & stops
+Exec=/usr/bin/python3 @SCRIPT@ --home
