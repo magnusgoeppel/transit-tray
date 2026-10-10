@@ -23,7 +23,7 @@ Ein Statusleisten-Widget für Linux (gebaut für COSMIC auf Pop!_OS, läuft übe
 | private Regionalbusse in Ostösterreich / Oberösterreich | VOR AnachB bzw. OÖVV (Verkehrsauskunft Österreich) |
 | Rest Europas und über die Grenze | [Transitous](https://transitous.org): offene Fahrplandaten der Betreiber, Echtzeit wo vorhanden ([Quellen](https://transitous.org/sources/)) |
 | Rad, zu Fuß, Auto | TomTom (mit Schlüssel, mit Verkehr), sonst die OSRM-Router der FOSSGIS auf OpenStreetMap |
-| Karte | [basemap.at](https://basemap.at) in Österreich (CC BY 4.0), rundherum © [OpenStreetMap](https://www.openstreetmap.org/copyright)-Mitwirkende |
+| Karte | [basemap.at](https://basemap.at) in Österreich (CC BY 4.0), rundherum © [OpenStreetMap](https://www.openstreetmap.org/copyright)-Mitwirkende, an der Grenze weich ineinander übergehend |
 
 Nur die Schnittstelle der Wiener Linien ist offiziell dokumentiert. Die von ÖBB, VOR, OÖVV und Linz AG sind die ihrer Apps und Webseiten und können sich ändern; dann rechnet für eine Weile die ÖBB-Auskunft bzw. fehlen Abfahrten (der Grund steht im Journal).
 
@@ -34,6 +34,8 @@ Voraussetzungen (Debian, Ubuntu, Pop!_OS):
 ```sh
 sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
 ```
+
+Optional `python3-numpy`: Damit läuft basemap.at an der Grenze weich in OpenStreetMap aus (ohne seinen lila Grenzsaum); ohne numpy wechselt die Karte dort hart.
 
 Dann:
 
@@ -64,7 +66,7 @@ python3 ~/.local/bin/transit-tray.py --once     # einmal abfragen, Menü als Tex
 ## Rücksicht auf die Dienste
 
 - **Transitous** wird von Freiwilligen betrieben und ist nur für offene, nicht kommerzielle Projekte gedacht ([Bedingungen](https://transitous.org/api/)). Das Widget fragt Abfahrten dort höchstens alle 4 Minuten ab – dazu einmal, wenn man den Filter einer Haltestelle öffnet oder ändert – und nennt die Quellen im Verlauf („Route by Transitous“).
-- **OpenStreetMap-Kacheln** nach der [Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/): nur außerhalb Österreichs, 30 Tage zwischengespeichert.
+- **OpenStreetMap-Kacheln** nach der [Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/): nur außerhalb Österreichs und an der Grenze, 30 Tage zwischengespeichert.
 - Abfahrten insgesamt alle 2 Minuten, über getaktete Verbindungen alle 5, nachts ohne Fahrten alle 15.
 
 ## Lizenz

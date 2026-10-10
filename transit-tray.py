@@ -18,7 +18,7 @@ und OÖVV (Verkehrsauskunft Oesterreich, private Regionalbusse). Im Rest Europas
 ueber die Grenze) rechnet Transitous mit den offenen Fahrplaenen der Betreiber. Auto,
 Rad und zu Fuss rechnet TomTom mit aktuellem Verkehr (kostenloser Schluessel), ohne
 Schluessel die OpenStreetMap-Router der FOSSGIS. Die Karte ist in Oesterreich
-basemap.at, rundherum OpenStreetMap.
+basemap.at, rundherum OpenStreetMap, an der Grenze weich ineinander uebergehend.
 
 Quellcode: https://github.com/magnusgoeppel/transit-tray (MIT-Lizenz).
 
@@ -3821,7 +3821,13 @@ SIGN_YELLOW, SIGN_GREEN = (0.965, 0.788, 0.082), (0.114, 0.478, 0.271)
 
 
 COVER_MARGIN = 0.025            # Grad, rund 2 km: so weit weg von der Grenze gilt eine Kachel als "in"
+BORDER_ERROR = 0.015            # Grad: so ungenau ist die Grenze oben
+# An der Grenze laeuft basemap.at weich in OpenStreetMap aus (edge_tile, braucht numpy):
+EDGE_BAND = 14                  # px: so weit innen an der Grenze verschwindet der lila Saum von basemap.at
+EDGE_FADE = 6                   # px: so weich blenden die Flaechen von basemap.at an der Grenze aus
+EDGE_MEMORY = 64                # so viele ausgeblendete Randkacheln im Speicher
 _COVER = {}
+np = None                       # numpy, erst fuer die erste Randkachel geladen (edge_numpy)
 AUSTRIA_EDGES = [(a[0], a[1], b[0], b[1]) for ring in AUSTRIA_RINGS for a, b in zip(ring, ring[1:] + ring[:1])]
 
 
@@ -3854,13 +3860,15 @@ def segment_in_box(x0, y0, x1, y1, box):
 
 
 def austria_cover(z, x, y):
-    """Wie eine Kachel zu Oesterreich liegt: "in" (ganz, mit Abstand zur Grenze), "out"
-    oder "edge" - danach richtet sich, welche Karte dort liegt. Gemerkt je Kachel."""
+    """Wie eine Kachel zu Oesterreich liegt: "in" (ganz, mit Abstand zur Grenze - mehr, als
+    basemap.at an der Grenze ausblendet), "out" oder "edge" - danach richtet sich, welche
+    Karte dort liegt. Gemerkt je Kachel."""
     key = (z, x, y)
     cover = _COVER.get(key)
     if cover is None:
         west, south, east, north = tile_box(z, x, y)
-        box = (west - COVER_MARGIN, south - COVER_MARGIN, east + COVER_MARGIN, north + COVER_MARGIN)
+        margin = max(COVER_MARGIN, (EDGE_BAND + 4) / float(TILE_PX) * (east - west) + BORDER_ERROR)
+        box = (west - margin, south - margin, east + margin, north + margin)
         if box[2] < AUSTRIA_BOX[0] or box[0] > AUSTRIA_BOX[2] or box[3] < AUSTRIA_BOX[1] or box[1] > AUSTRIA_BOX[3]:
             cover = "out"
         elif any(segment_in_box(ax, ay, bx, by, box) for ax, ay, bx, by in AUSTRIA_EDGES):
@@ -3871,6 +3879,93 @@ def austria_cover(z, x, y):
             _COVER.clear()
         _COVER[key] = cover
     return cover
+
+
+def edge_numpy():
+    """numpy fuer die weichen Randkacheln laden - ohne (Paket python3-numpy) bleibt der harte
+    Rand mit dem lila Grenzsaum von basemap.at."""
+    global np
+    if np is None:
+        try:
+            import numpy
+            np = numpy
+        except ImportError:
+            np = False
+    return np is not False
+
+
+def pixbuf_rgba(pixbuf):
+    """Ein Pixbuf als (Hoehe, Breite, 4) uint8 RGBA."""
+    n, h, w, stride = pixbuf.get_n_channels(), pixbuf.get_height(), pixbuf.get_width(), pixbuf.get_rowstride()
+    raw = np.frombuffer(pixbuf.get_pixels(), "uint8")
+    raw = np.pad(raw, (0, max(0, h * stride - raw.size)))[:h * stride]     # die letzte Zeile ist kuerzer
+    px = raw.reshape(h, stride)[:, :w * n].reshape(h, w, n)
+    if n == 3:
+        px = np.concatenate([px, np.full((h, w, 1), 255, "uint8")], axis=2)
+    return px
+
+
+def inside_distance(alpha, limit):
+    """Abstand jedes Pixels zum naechsten durchsichtigen (Deckkraft unter 1/2) in px, hoechstens
+    limit - achteckig genaehert, auf halber Aufloesung gerechnet und bilinear verdoppelt. Hoehe
+    und Breite muessen gerade sein."""
+    h, w = alpha.shape
+    inside = alpha.reshape(h // 2, 2, w // 2, 2).min(axis=(1, 3)) >= 0.5
+    dist = np.full(inside.shape, float(limit), "float32")
+    reach = ~inside
+    dist[reach] = 0.0
+    for k in range(1, int(math.ceil(limit / 2.0)) + 2):
+        grow = reach.copy()
+        grow[1:, :] |= reach[:-1, :]
+        grow[:-1, :] |= reach[1:, :]
+        grow[:, 1:] |= reach[:, :-1]
+        grow[:, :-1] |= reach[:, 1:]
+        if k % 2 == 0:                  # abwechselnd mit den Diagonalen: achteckig statt quadratisch
+            grow[1:, 1:] |= reach[:-1, :-1]
+            grow[1:, :-1] |= reach[:-1, 1:]
+            grow[:-1, 1:] |= reach[1:, :-1]
+            grow[:-1, :-1] |= reach[1:, 1:]
+        dist[grow & ~reach] = 2.0 * k - 1.0
+        reach = grow
+
+    def double(a, axis):
+        a = np.moveaxis(a, axis, 0)
+        out = np.empty((2 * a.shape[0],) + a.shape[1:], a.dtype)
+        out[0::2] = 0.75 * a + 0.25 * np.concatenate([a[:1], a[:-1]])
+        out[1::2] = 0.75 * a + 0.25 * np.concatenate([a[1:], a[-1:]])
+        return np.moveaxis(out, 0, axis)
+    return np.minimum(double(double(dist, 0), 1), limit)
+
+
+def edge_tile(px, alpha):
+    """Eine Randkachel von basemap.at, die weich in OpenStreetMap auslaeuft: ihr lila Grenzsaum
+    (bis EDGE_BAND px innen) verschwindet, die Flaechen blenden auf den letzten EDGE_FADE px aus.
+    Schrift mit ihrem weissen Rand und dunkle Linien bleiben stehen - basemap.at schreibt
+    Ortsnamen auch ueber die Grenze hinaus. px: die Kachel (RGBA), alpha: Deckkraft (0..1) mit
+    den Nachbarn, EDGE_BAND + 4 px rundherum. -> (cairo-Flaeche, Puffer) - der Puffer muss
+    leben, solange die Flaeche gebraucht wird."""
+    import cairo
+    pad = EDGE_BAND + 4
+    dist = inside_distance(alpha, EDGE_BAND + 2)[pad:pad + 256, pad:pad + 256]
+    t = np.clip(dist / EDGE_FADE, 0.0, 1.0)
+    weight = t * t * (3 - 2 * t)
+    red, green, blue = (px[..., k].astype("float32") for k in range(3))
+    lilac = np.clip((np.minimum(blue - green, 2 * (red - green)) - 4) / 10.0, 0.0, 1.0)
+    weight *= 1 - lilac * (dist <= EDGE_BAND)
+    near = (0.299 * red + 0.587 * green + 0.114 * blue) < 110      # Schrift und dunkle Linien ...
+    for _ in range(2):                                              # ... mit 2 px Rand
+        grow = near.copy()
+        grow[1:, :] |= near[:-1, :]
+        grow[:-1, :] |= near[1:, :]
+        grow[:, 1:] |= near[:, :-1]
+        grow[:, :-1] |= near[:, 1:]
+        near = grow
+    weight = np.maximum(weight, near * (1 - lilac))
+    cover = px[..., 3].astype("float32") / 255.0 * weight
+    out = np.empty((256, 256, 4), "float32")
+    out[..., 0], out[..., 1], out[..., 2], out[..., 3] = blue * cover, green * cover, red * cover, 255 * cover
+    buf = bytearray((out + 0.5).astype("uint8").tobytes())
+    return cairo.ImageSurface.create_for_data(buf, cairo.FORMAT_ARGB32, 256, 256, 1024), buf
 
 
 def project(lon, lat):
@@ -3890,6 +3985,7 @@ class TileCache:
 
     def __init__(self):
         self.mem = collections.OrderedDict()    # Schluessel -> (Pixbuf oder None, Zeit)
+        self.edges = collections.OrderedDict()  # (z, x, y) -> (Flaeche, Puffer, Nachbarn, die fehlten)
         self.pending = set()
         self.queue = []
         self.cond = threading.Condition()
@@ -3923,6 +4019,46 @@ class TileCache:
     def peek(self, layer, z, x, y):
         item = self.mem.get((layer, z, x, y))
         return item[0] if item else None
+
+    def peek_edge(self, z, x, y):
+        got = self.edges.get((z, x, y))
+        return got[0] if got else None
+
+    def edge(self, z, x, y):
+        """Die Randkachel (z, x, y) von basemap.at, weich auslaufend (edge_tile); None, solange
+        sie fehlt. Die Grenze kann in den Nachbarn liegen - fehlt dort einer noch, gilt vorerst
+        sein Rand wie der der Kachel; kommt er, wird neu gerechnet."""
+        key = (z, x, y)
+        got = self.edges.get(key)
+        if got is not None:
+            self.edges.move_to_end(key)
+            return got[0]
+        center = self.get("normal", z, x, y)
+        if center is None:
+            return None
+        px = pixbuf_rgba(center)
+        mosaic = np.pad(px[..., 3].astype("float32") / 255.0, 256, mode="edge")
+        missing = set()
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if not dx and not dy:
+                    continue
+                cover = austria_cover(z, x + dx, y + dy)
+                if cover == "edge":
+                    near = self.peek("normal", z, x + dx, y + dy)
+                    if near is None:
+                        missing.add((z, x + dx, y + dy))
+                        continue
+                    part = pixbuf_rgba(near)[..., 3].astype("float32") / 255.0
+                else:
+                    part = 1.0 if cover == "in" else 0.0
+                mosaic[256 + 256 * dy:512 + 256 * dy, 256 + 256 * dx:512 + 256 * dx] = part
+        pad = EDGE_BAND + 4
+        surface, buf = edge_tile(px, mosaic[256 - pad:512 + pad, 256 - pad:512 + pad])
+        self.edges[key] = (surface, buf, missing)
+        while len(self.edges) > EDGE_MEMORY:
+            self.edges.popitem(last=False)
+        return surface
 
     def request(self, key):
         with self.cond:
@@ -3981,6 +4117,13 @@ class TileCache:
         self.mem.move_to_end(key)
         while len(self.mem) > self.MEMORY:
             self.mem.popitem(last=False)
+        layer, z, x, y = key
+        if layer == "normal":                   # Randkacheln, denen sie als Nachbar fehlte, neu rechnen
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    got = self.edges.get((z, x + dx, y + dy))
+                    if got is not None and (dx or dy) and (z, x, y) in got[2]:
+                        del self.edges[(z, x + dx, y + dy)]
         for view in self.views:
             view.area.queue_draw()
         return GLib.SOURCE_REMOVE
@@ -4129,46 +4272,55 @@ class MapView:
 
     def draw_base(self, cr, hidpi):
         """Die Grundkarte: in Oesterreich basemap.at, rundherum OpenStreetMap, an der
-        Grenze beide uebereinander (basemap.at ist ausserhalb durchsichtig - die
-        HiDPI-Kacheln sind dort weiss, also an der Grenze die normalen)."""
+        Grenze beide uebereinander - basemap.at ist ausserhalb durchsichtig und laeuft mit
+        numpy ohne seinen lila Grenzsaum weich aus (edge_tile). Die HiDPI-Kacheln sind
+        ausserhalb weiss, also an der Grenze die normalen."""
         cr.set_source_rgb(*MAP_BG)
         cr.paint()
         used = set()
+        soft = edge_numpy()
         for tz, x, y, left, top, side in self.visible_tiles():
             cover = austria_cover(tz, x, y)
             if cover != "in":
                 self.paint_layer(cr, "osm", tz, x, y, left, top, side)
                 used.add("osm")
             if cover != "out":
-                self.paint_layer(cr, "hidpi" if hidpi and cover == "in" else "normal", tz, x, y, left, top, side)
+                layer = "hidpi" if hidpi and cover == "in" else "edge" if cover == "edge" and soft else "normal"
+                self.paint_layer(cr, layer, tz, x, y, left, top, side)
                 used.add("basemap")
         self.credits = used
 
     def paint_layer(self, cr, layer, tz, x, y, left, top, side):
-        """Eine Kachel - fehlt sie noch, die groebere darueber, vergroessert."""
-        pixbuf = self.tiles.get(layer, tz, x, y)
+        """Eine Kachel - fehlt sie noch, die groebere darueber, vergroessert. "edge" ist die
+        weich auslaufende Randkachel von basemap.at."""
+        pixbuf = self.tiles.edge(tz, x, y) if layer == "edge" else self.tiles.get(layer, tz, x, y)
         if pixbuf is not None:
             self.paint_tile(cr, pixbuf, left, top, side, 0, 0, 1)
             return
         for up in range(1, 5):
             if tz - up < 0:
                 break
-            parent = self.tiles.peek(layer, tz - up, x >> up, y >> up)
+            parent = (self.tiles.peek_edge(tz - up, x >> up, y >> up) if layer == "edge"
+                      else self.tiles.peek(layer, tz - up, x >> up, y >> up))
             if parent is not None:
                 part = 2 ** up
                 self.paint_tile(cr, parent, left, top, side, x % part, y % part, part)
                 break
 
     @staticmethod
-    def paint_tile(cr, pixbuf, left, top, side, sub_x, sub_y, parts):
-        """Kachel (oder ihr Teil sub_x/sub_y von parts x parts) auf side x side Pixel."""
+    def paint_tile(cr, image, left, top, side, sub_x, sub_y, parts):
+        """Kachel (oder ihr Teil sub_x/sub_y von parts x parts) auf side x side Pixel - ein
+        Pixbuf oder eine cairo-Flaeche (Randkachel)."""
         cr.save()
         cr.rectangle(left, top, side + 0.5, side + 0.5)
         cr.clip()
-        factor = side * parts / pixbuf.get_width()
+        factor = side * parts / image.get_width()
         cr.translate(left - sub_x * side, top - sub_y * side)
         cr.scale(factor, factor)
-        Gdk.cairo_set_source_pixbuf(cr, pixbuf, 0, 0)
+        if isinstance(image, GdkPixbuf.Pixbuf):
+            Gdk.cairo_set_source_pixbuf(cr, image, 0, 0)
+        else:
+            cr.set_source_surface(image, 0, 0)
         cr.paint()
         cr.restore()
 
