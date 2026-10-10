@@ -8,8 +8,9 @@ Auto. Im Stil der anderen Widgets (weather-tray.py, pomodoro-tray.py).
 Das Symbol ist das Haltestellen-H. Das Menue zeigt fuer die Haltestellen bei dir die
 naechsten Abfahrten mit Uhrzeit und Verspaetung; was man zu Fuss nicht mehr
 erreicht, faellt weg. Ein Klick auf eine Abfahrt zeigt ihren Fahrtverlauf, "Plan a
-route..." oeffnet den Routenplaner, "Home & stops..." die Wahl von Zuhause,
-Haltestellen und dem TomTom-Schluessel.
+route..." oeffnet den Routenplaner, "Home & stops..." die Wahl von Zuhause, der
+Haltestellen (Reihenfolge; welche Linien und Richtungen sie zeigen) und den
+TomTom-Schluessel.
 
 In Oesterreich kommt jedes Verkehrsmittel von der Schnittstelle seines Betreibers:
 Wiener Linien (Open Data und Routenplaner), Linz AG (EFA), ÖBB (Zuege, Postbus), VOR
@@ -174,7 +175,7 @@ MAP_CREDITS = {"basemap": "basemap.at", "osm": "© OpenStreetMap contributors"}
 
 APP_URL = "https://github.com/magnusgoeppel/transit-tray"
 # Transitous und die OpenStreetMap-Kacheln verlangen Name, Version und Kontakt
-HEADERS = {"Accept": "application/json", "Accept-Encoding": "gzip", "User-Agent": "transit-tray/3.0 (+%s)" % APP_URL}
+HEADERS = {"Accept": "application/json", "Accept-Encoding": "gzip", "User-Agent": "transit-tray/3.1 (+%s)" % APP_URL}
 TIMEOUT = 20
 
 # Abfragen
@@ -197,6 +198,20 @@ BOARD_START, BOARD_LEAST, BOARD_MOST = 30, 12, 50
 BOARD_SPARE = 3
 EFA_LIMIT = 20          # Abfahrten je Linz-AG-Abfrage
 MOTIS_LIMIT = 24        # Abfahrten je Transitous-Abfrage
+# Blendet der Filter Linien aus, muessen die Tafeln weiter reichen, bis genug gezeigte
+# dabei sind: die ÖBB-Tafel dann hoechstens so gross (voll ueber 93 Minuten an einem
+# Wiener Bahnhof mit U-Bahn, Bim und Bus: rund 100 Abfahrten, 11 statt 7 KB gzip).
+# VOR und OÖVV antworten ungepackt - ihre Tafeln bleiben bei BOARD_MOST. Linz AG und
+# Transitous lernen ihre Groesse dann wie die HAFAS-Tafeln, ohne Filter bleibt es bei
+# EFA_LIMIT bzw. MOTIS_LIMIT.
+BOARD_WIDE = 150
+EFA_MOST = 60
+MOTIS_MOST = 64
+# Welche Linien in welche Richtungen an einer Haltestelle fahren (fuer den Filter):
+# alle Abfahrten der naechsten SURVEY_MIN Minuten, gemerkt fuer SURVEY_AGE.
+SURVEY_MIN = 240
+SURVEY_JNY, SURVEY_EFA, SURVEY_MOTIS = 200, 80, 80
+SURVEY_AGE = 30 * 60
 REACH_SLACK = 30        # s: so knapp darf es fuer "noch erreichbar" sein
 
 # Zuhause und Haltestellen
@@ -545,6 +560,15 @@ def platform(stop, prefix):
     return planned, (real if real and real != planned else None)
 
 
+def direction_flag(flag, valid=("H", "R")):
+    """Richtung einer Linie, wie sie der Betreiber kennzeichnet: H/R (Hin- und
+    Rueckrichtung) bei Wiener Linien, Linz AG und den Stadtlinien der ÖBB-Tafel, 0/1 bei
+    Transitous (GTFS). Fernzuege tragen bei der ÖBB "x", manche Busse 0 oder 2 ohne
+    feste Bedeutung - dann None, und es zaehlt das Ziel."""
+    flag = str(flag if flag is not None else "").strip()
+    return flag if flag in valid else None
+
+
 def parse_board(res, source):
     """Abfahrten aus StationBoard, nach tatsaechlicher Zeit sortiert."""
     common = res.get("common") or {}
@@ -560,7 +584,8 @@ def parse_board(res, source):
         kind = product_kind(prod, common)
         plat, plat_new = platform(stop, "d")
         out.append({"line": line_label(prod, kind), "kind": kind,
-                    "direction": str(j.get("dirTxt") or "").strip(), "planned": planned,
+                    "direction": str(j.get("dirTxt") or "").strip(), "dir": direction_flag(j.get("dirFlg")),
+                    "planned": planned,
                     "real": hafas_time(date, stop.get("dTimeR"), stop.get("dTZOffset")),
                     "cancelled": bool(stop.get("dCncl") or j.get("isCncl")),
                     "platform": plat_new or plat, "platform_changed": bool(plat_new),
@@ -689,7 +714,8 @@ def efa_departures(source, stop_id, now, limit=EFA_LIMIT):
         status = str(dep.get("realtimeTripStatus") or "").upper()
         out.append({"line": str(line.get("number") or line.get("symbol") or "?"),
                     "kind": efa_kind(line),
-                    "direction": str(line.get("direction") or "").strip(), "planned": planned,
+                    "direction": str(line.get("direction") or "").strip(),
+                    "dir": direction_flag((line.get("liErgRiProj") or {}).get("direction")), "planned": planned,
                     "real": real if line.get("realtime") == "1" or real else None,
                     "cancelled": "CANCEL" in status, "platform": None, "platform_changed": False, "jid": None,
                     "at": str(dep.get("stopName") or ""), "source": source,
@@ -881,6 +907,7 @@ def wl_departures(divas, now):
                     "line": str(vehicle.get("name") or line.get("name") or "?"),
                     "kind": WL_KINDS.get(vehicle.get("type") or line.get("type"), "bus"),
                     "direction": direction.title() if direction.isupper() else direction,
+                    "dir": direction_flag(line.get("direction")),
                     "planned": planned if planned is not None else real,
                     "real": real if realtime and real is not None else None, "cancelled": False,
                     "platform": None, "platform_changed": False, "jid": None, "at": title, "source": "wl",
@@ -956,7 +983,8 @@ def motis_departures(stop_id, now, limit=MOTIS_LIMIT):
         track, changed = motis_track(place)
         out.append({"line": motis_line(st), "kind": MOTIS_KINDS[st["mode"]],
                     "direction": str(st.get("headsign") or (st.get("tripTo") or {}).get("name") or "").strip(),
-                    "planned": planned, "real": iso_time(place.get("departure")) if st.get("realTime") else None,
+                    "dir": direction_flag(st.get("directionId"), ("0", "1")), "planned": planned,
+                    "real": iso_time(place.get("departure")) if st.get("realTime") else None,
                     "cancelled": bool(st.get("cancelled") or st.get("tripCancelled") or place.get("cancelled")),
                     "platform": track, "platform_changed": changed, "jid": st.get("tripId"),
                     "at": str(place.get("name") or ""), "source": "motis",
@@ -1461,6 +1489,161 @@ def learn_serves(stop, now):
     return sorted(serve), True
 
 
+# ------------------------------------------------------------------ Filter: Linien und Richtungen
+
+# Je Haltestelle (settings["filters"][stop_key]) eine Liste, was Menue und Abfahrten
+# weglassen: {"line", "kind"} die ganze Linie, {"line", "kind", "towards": [Ziele],
+# "dir"} eine Richtung. Was nicht drinsteht, wird gezeigt - auch neue Linien und Ziele,
+# etwa Nachtbusse oder Ersatzverkehr. Die Richtung zaehlt nach der Kennung des
+# Betreibers (Wiener Linien, Linz AG und ÖBB-Stadtlinien H/R, Transitous 0/1): so
+# gehoeren Kurzfuehrungen dazu. Zuege haben keine, dort zaehlt das Ziel.
+
+def line_key(line):
+    """Linie zum Vergleichen: 'REX 8' = 'rex8'."""
+    return re.sub(r"\s+", "", str(line or "")).casefold()
+
+
+def towards_key(text):
+    """Ziel zum Vergleichen: 'Ort, Gasse' (Wiener Linien) = 'Ort Gasse' (ÖBB)."""
+    return re.sub(r"[^0-9a-z]+", "", folded(text))
+
+
+def natural(text):
+    """Sortierschluessel fuer Linien: '9' vor '11', 'U3' vor 'U6'."""
+    return [int(p) if p.isdigit() else p.casefold() for p in re.split(r"(\d+)", str(text))]
+
+
+def dep_hidden(dep, rules):
+    """Laesst der Filter (rules) diese Abfahrt weg?"""
+    line = line_key(dep["line"])
+    for rule in rules or []:
+        if line_key(rule["line"]) != line:
+            continue
+        if not rule.get("towards"):
+            return True                         # die ganze Linie
+        if rule.get("dir") and dep.get("dir"):
+            if rule["dir"] == dep["dir"]:
+                return True
+        elif towards_key(dep["direction"]) in {towards_key(t) for t in rule["towards"]}:
+            return True
+    return False
+
+
+def same_direction(rule, direction):
+    """Meint die Regel diese Richtung (aus line_groups)?"""
+    if not rule.get("towards"):
+        return False
+    if rule.get("dir") and direction.get("dir"):
+        return rule["dir"] == direction["dir"]
+    return bool({towards_key(t) for t in rule["towards"]} & {towards_key(t) for t in direction["towards"]})
+
+
+def line_hidden(rules, line):
+    return any(line_key(r["line"]) == line_key(line) and not r.get("towards") for r in rules or [])
+
+
+def direction_hidden(rules, group, direction):
+    return line_hidden(rules, group["line"]) or any(
+        line_key(r["line"]) == line_key(group["line"]) and same_direction(r, direction) for r in rules or [])
+
+
+def direction_rule(group, direction):
+    rule = {"line": group["line"], "kind": group["kind"], "towards": list(direction["towards"])}
+    if direction.get("dir"):
+        rule["dir"] = direction["dir"]
+    return rule
+
+
+def toggle_direction(rules, group, direction, show):
+    """Die Regeln, wenn eine Richtung an- oder abgehakt wird. Ist danach keine bekannte
+    Richtung der Linie mehr an, faellt die ganze Linie weg - auch mit neuen Zielen."""
+    key = line_key(group["line"])
+    others = [r for r in rules if line_key(r["line"]) != key]
+    mine = [r for r in rules if line_key(r["line"]) == key and r.get("towards")]
+    if line_hidden(rules, group["line"]):       # war ganz aus: alle Richtungen einzeln aus
+        mine = [direction_rule(group, d) for d in group["dirs"]]
+    mine = [r for r in mine if not same_direction(r, direction)]
+    if not show:
+        mine.append(direction_rule(group, direction))
+    if group["dirs"] and all(any(same_direction(r, d) for r in mine) for d in group["dirs"]):
+        mine = [{"line": group["line"], "kind": group["kind"]}]
+    return others + mine
+
+
+def toggle_line(rules, group, show):
+    """Die ganze Linie an (alle ihre Regeln weg) oder aus."""
+    key = line_key(group["line"])
+    others = [r for r in rules if line_key(r["line"]) != key]
+    return others if show else others + [{"line": group["line"], "kind": group["kind"]}]
+
+
+def line_groups(deps, rules):
+    """Linien und Richtungen einer Haltestelle fuer den Filter, aus Abfahrten und Regeln -
+    so bleibt auch waehlbar, was ausgeblendet ist und gerade nicht faehrt.
+    -> [{"line", "kind", "dirs": [{"dir", "towards": [Ziele, das haeufigste zuerst]}]}],
+    Zug vor U-Bahn vor Bim vor Bus, darin nach Nummer."""
+    lines = {}
+
+    def add(line, kind, flag, towards, weight):
+        group = lines.setdefault(line_key(line), {"line": line, "kind": kind, "dirs": []})
+        if not towards:
+            return
+        key = towards_key(towards)
+        for item in group["dirs"]:
+            if (item["dir"] == flag) if flag and item["dir"] else key in item["count"]:
+                break
+        else:
+            item = {"dir": None, "count": {}, "name": {}}
+            group["dirs"].append(item)
+        item["dir"] = item["dir"] or flag
+        item["count"][key] = item["count"].get(key, 0) + weight
+        item["name"].setdefault(key, towards)
+
+    for dep in deps:
+        add(dep["line"], dep["kind"], dep.get("dir"), dep["direction"], 1)
+    for rule in rules or []:
+        for towards in rule.get("towards") or [None]:
+            add(rule["line"], rule.get("kind") or "bus", rule.get("dir"), towards, 0)
+    out = []
+    for group in lines.values():
+        dirs = [{"dir": item["dir"], "towards": [item["name"][k] for k in sorted(item["count"],
+                                                                            key=lambda k: -item["count"][k])]}
+                for item in group["dirs"]]
+        dirs.sort(key=lambda d: folded(d["towards"][0]))
+        out.append({"line": group["line"], "kind": group["kind"], "dirs": dirs})
+    out.sort(key=lambda g: (KIND_ORDER.index(g["kind"]) if g["kind"] in KIND_ORDER else len(KIND_ORDER),
+                            natural(g["line"])))
+    return out
+
+
+def filter_text(rules, prefix=""):
+    """'13A, U4 → Hütteldorf' - was der Filter weglaesst."""
+    parts = sorted(rules or [], key=lambda r: (natural(r["line"]), folded((r.get("towards") or [""])[0])))
+    return ", ".join("%s → %s" % (r["line"], short_name(r["towards"][0], prefix)) if r.get("towards") else r["line"]
+                     for r in parts)
+
+
+def clean_rules(rules):
+    """Regeln aus settings.json pruefen."""
+    out = []
+    for rule in rules if isinstance(rules, list) else []:
+        if not isinstance(rule, dict) or not str(rule.get("line") or "").strip():
+            continue
+        item = {"line": str(rule["line"]).strip(), "kind": rule["kind"] if rule.get("kind") in KIND_ORDER else "bus"}
+        towards = rule.get("towards") if isinstance(rule.get("towards"), list) else []
+        towards = [str(t) for t in towards if str(t).strip()]
+        if towards:
+            item["towards"] = towards
+            if rule.get("dir"):
+                item["dir"] = str(rule["dir"])
+        out.append(item)
+    return out
+
+
+def stop_rules(settings, stop):
+    return (settings.get("filters") or {}).get(stop_key(stop)) or []
+
+
 # ------------------------------------------------------------------ Abfahrten
 
 def menu_quota(count):
@@ -1468,74 +1651,95 @@ def menu_quota(count):
     return max(2, MENU_ROWS // max(1, count))
 
 
-def next_size(table, stop, asked, now, target):
-    """Wie viele Abfahrten die HAFAS-Tafel naechstes Mal bringen soll, damit target noch
-    kommende der Haltestelle selbst dabei sind (plus ein Viertel Reserve). War sie
-    kuerzer als verlangt, endete das Zeitfenster vorher: dann reicht die Groesse."""
-    if len(table) < asked:
-        return asked
-    ahead = [k for k, dep in enumerate(table) if at_stop(dep, stop) and eff_time(dep) >= now]
-    mine = sum(1 for dep in table if at_stop(dep, stop))
+def next_size(table, keep, asked, now, target, least=BOARD_LEAST, most=BOARD_MOST):
+    """Wie viele Abfahrten eine Tafel naechstes Mal bringen soll, damit target noch
+    kommende dabei sind, die keep zaehlt (bei HAFAS nur die der Haltestelle selbst; was
+    der Filter zeigt) - plus ein Viertel Reserve. War sie kuerzer als verlangt, endete
+    das Zeitfenster vorher: dann reicht die Groesse."""
+    ahead = [k for k, dep in enumerate(table) if keep(dep) and eff_time(dep) >= now]
+    mine = sum(1 for dep in table if keep(dep))
     if len(ahead) >= target:
         wanted = (ahead[target - 1] + 1) * 1.25
+    elif len(table) < asked:
+        wanted = asked
     elif mine:
         wanted = len(table) * (mine - len(ahead) + target) / float(mine) * 1.25
     else:
         wanted = asked * 2
-    return max(BOARD_LEAST, min(BOARD_MOST, int(math.ceil(wanted))))
+    return max(least, min(most, int(math.ceil(wanted))))
 
 
 def stop_key(stop):
     return stop.get("key") or (stop.get("ids") or {}).get("oebb") or stop.get("name")
 
 
-def fetch_departures(stops, now, previous=None):
+def fetch_departures(stops, now, previous=None, filters=None, survey=False):
     """Die Abfahrten aller gewaehlten Haltestellen, jede Linie von ihrem Betreiber:
     Wiener Linien und Linz AG ihre eigenen, die ÖBB Zuege und Postbus, VOR bzw. OÖVV
     die anderen Busse (diese hoechstens alle POLL_VAO, sie antworten gross). Alle
-    Quellen gleichzeitig. -> (Abfahrten je Haltestelle, gelernte Tafelgroessen,
-    VAO-Stand, Fehler je Quelle)"""
+    Quellen gleichzeitig. Die Tafeln sind so gross, dass genug Abfahrten dabei sind, die
+    der Filter zeigt (filters: {stop_key: Regeln}); ist er neu oder geaendert, einmal so
+    gross wie erlaubt und ohne Zwischenstand. survey: alle Abfahrten der naechsten
+    SURVEY_MIN Minuten - welche Linien hier fahren. -> (Abfahrten je Haltestelle,
+    gelernte Tafelgroessen, VAO-Stand, Fehler je Quelle)"""
     previous = previous or {}
+    filters = filters or {}
     sizes = dict(previous.get("sizes") or {})
-    vao_old = previous.get("vao") or {}
+    vao_old = {} if survey else previous.get("vao") or {}
     quota = menu_quota(len(stops)) + BOARD_SPARE
     serves = [set(stop_serves(s)) for s in stops]
-    jobs, vao_new = {}, {}
+    rules = [filters.get(stop_key(s)) or [] for s in stops]
+    applied = previous.get("filters") or {}
+    wide = [r != (applied.get(stop_key(s)) or []) for s, r in zip(stops, rules)]
+    jobs, vao_new, asked = {}, {}, {}
     boards_by = {"oebb": {}, "vor": {}, "ooevv": {}, "motis": {}}
     for source in ("oebb", "vor", "ooevv"):
         wanted = []
-        for stop, serve in zip(stops, serves):
+        for stop, serve, broad in zip(stops, serves, wide):
             lid = (stop.get("ids") or {}).get(source)
             if source not in serve or not lid:
                 continue
             key = "%s|%s" % (source, lid)
-            if source != "oebb":
+            if source != "oebb":                # gross und ungepackt: wie bisher, auch mit Filter
                 old = vao_old.get(key)
                 if old and now - old.get("at", 0) < POLL_VAO:
                     vao_new[key] = old
                     boards_by[source][stop_key(stop)] = old.get("deps") or []
                     continue
+                asked[key] = BOARD_MOST if survey else sizes.get(key, BOARD_START)
+            else:
+                asked[key] = SURVEY_JNY if survey else BOARD_WIDE if broad else sizes.get(key, BOARD_START)
             wanted.append((stop, key, lid))
         if wanted:
-            calls = [hafas_board(source, lid, now, sizes.get(key, BOARD_START)) for _stop, key, lid in wanted]
+            extra = {"dur": SURVEY_MIN + BOARD_BEFORE // 60} if survey else None
+            calls = [hafas_board(source, lid, now, asked[key], extra) for _stop, key, lid in wanted]
             jobs[source] = (lambda src=source, c=calls: hafas(src, *c))
             boards_by[source + "_wanted"] = wanted
     divas = sorted({s["ids"]["wl"] for s, sv in zip(stops, serves) if "wl" in sv and s["ids"].get("wl")})
     if divas:
         jobs["wl"] = lambda: wl_departures(divas, now)
-    for stop, serve in zip(stops, serves):
-        if "linzag" in serve and stop["ids"].get("linzag"):
-            jobs["linzag|" + stop["ids"]["linzag"]] = (lambda sid=stop["ids"]["linzag"]: efa_departures("linzag", sid, now))
+    for stop, serve, broad in zip(stops, serves, wide):
+        sid = (stop.get("ids") or {}).get("linzag")
+        if "linzag" in serve and sid:
+            key = "linzag|" + sid
+            size = SURVEY_EFA if survey else EFA_MOST if broad else sizes.get(key, EFA_LIMIT)
+            asked[key] = max(asked.get(key, 0), size)    # zwei Steige, eine Linz-AG-Haltestelle
+            jobs[key] = (lambda sid=sid, key=key: efa_departures("linzag", sid, now, asked[key]))
         sid = (stop.get("ids") or {}).get("motis")
         if "motis" in serve and sid:
             key = "motis|" + sid
             old = vao_old.get(key)
-            if old and now - old.get("at", 0) < POLL_MOTIS:
+            if old and not broad and now - old.get("at", 0) < POLL_MOTIS:
                 vao_new[key] = old
                 boards_by["motis"][stop_key(stop)] = old.get("deps") or []
             else:
-                jobs[key] = (lambda sid=sid: motis_departures(sid, now))
+                asked[key] = SURVEY_MOTIS if survey else MOTIS_MOST if broad else sizes.get(key, MOTIS_LIMIT)
+                jobs[key] = (lambda sid=sid, n=asked[key]: motis_departures(sid, now, n))
     results = run_parallel(jobs)
+
+    def counted(rule, base=None):
+        """Was fuer die Groesse einer Tafel zaehlt: was der Filter zeigt (und base zulaesst)."""
+        return lambda dep: (base is None or base(dep)) and not dep_hidden(dep, rule)
 
     errors = {}
     for source in ("oebb", "vor", "ooevv"):
@@ -1553,20 +1757,28 @@ def fetch_departures(stops, now, previous=None):
                 continue
             else:
                 table = parse_board(res, source)
-                sizes[key] = next_size(table, stop, sizes.get(key, BOARD_START), now, quota)
+                rule = filters.get(stop_key(stop)) or []
+                sizes[key] = next_size(table, counted(rule, lambda d, s=stop: at_stop(d, s)), asked[key], now,
+                                       quota, most=BOARD_WIDE if rule and source == "oebb" else BOARD_MOST)
             boards_by[source][stop_key(stop)] = table
             if source != "oebb":
                 vao_new[key] = {"at": now, "deps": [d for d in table if at_stop(d, stop)]}
     wl = results.get("wl")
     if isinstance(wl, Exception):
         errors["wl"] = wl
-    linz = {}
+    linz, learned = {}, {}
     for name, answer in results.items():
         if name.startswith("linzag|"):
             if isinstance(answer, Exception):
                 errors["linzag"] = answer
             else:
                 linz[name.split("|", 1)[1]] = answer
+                for stop in stops:
+                    if "linzag|" + str((stop.get("ids") or {}).get("linzag")) == name:
+                        rule = filters.get(stop_key(stop)) or []
+                        size = next_size(answer, counted(rule, lambda d: owner(d) == "linzag"), asked[name],
+                                         now, quota, EFA_LIMIT, EFA_MOST if rule else EFA_LIMIT)
+                        learned[name] = max(learned.get(name, 0), size)
         elif name.startswith("motis|"):
             if isinstance(answer, Exception) and not isinstance(answer, NoResult):
                 errors["motis"] = answer
@@ -1576,6 +1788,10 @@ def fetch_departures(stops, now, previous=None):
                 for stop in stops:
                     if "motis|" + str((stop.get("ids") or {}).get("motis")) == name:
                         boards_by["motis"][stop_key(stop)] = deps
+                        rule = filters.get(stop_key(stop)) or []
+                        learned[name] = next_size(deps, counted(rule), asked[name], now, quota,
+                                                  MOTIS_LIMIT, MOTIS_MOST if rule else MOTIS_LIMIT)
+    sizes.update(learned)
 
     boards = []
     for stop, serve in zip(stops, serves):
@@ -1632,8 +1848,9 @@ def fetch_state(settings, now, previous=None):
     """(Cache-Eintrag oder None, Zustand, Detail). Zustand: ok, offline, error. Fehlt
     nur eine Quelle, ist es "ok" - ihre Haltestellen zeigen dann den letzten Stand."""
     stops = settings.get("stops") or []
+    filters = settings.get("filters") or {}
     try:
-        boards, sizes, vao, errors = fetch_departures(stops, now, previous)
+        boards, sizes, vao, errors = fetch_departures(stops, now, previous, filters)
     except Offline as exc:
         return None, "offline", str(exc)
     except Exception as exc:  # noqa: BLE001 - das Widget soll weiterlaufen
@@ -1647,8 +1864,20 @@ def fetch_state(settings, now, previous=None):
         if board is None and i < len(old):
             boards[i] = old[i]
     detail = "; ".join("%s: %s" % (SOURCE_NAMES.get(k, k), v) for k, v in errors.items()) or None
+    # Mit welchem Filter die Tafelgroessen gelernt sind - ein neuer fragt einmal breit
+    applied = {stop_key(s): filters[stop_key(s)] for s in stops if filters.get(stop_key(s))}
     return {"fetched_at": time.time(), "stops": [stop_key(s) for s in stops], "boards": boards,
-            "sizes": sizes, "vao": vao, "missing": sorted(errors)}, "ok", detail
+            "sizes": sizes, "vao": vao, "filters": applied, "missing": sorted(errors)}, "ok", detail
+
+
+def survey_lines(stop, now):
+    """Alle Abfahrten der naechsten SURVEY_MIN Minuten an einer Haltestelle, von denselben
+    Schnittstellen wie im Menue: welche Linien hier in welche Richtungen fahren (fuer den
+    Filter). -> (Abfahrten, Betreiber ohne Antwort)"""
+    boards, _sizes, _vao, errors = fetch_departures([stop], now, survey=True)
+    if boards[0] is None:
+        raise next(iter(errors.values()), NoResult("No departures known."))
+    return boards[0], sorted(errors)
 
 
 # ------------------------------------------------------------------ Verbindungen
@@ -2112,8 +2341,9 @@ def clean_stop(stop):
 
 
 def load_settings():
-    """{"home", "stops", "prefix", "recent", "tomtom_key", "traffic_layer"};
-    ohne Datei (erster Start) leer."""
+    """{"home", "stops", "prefix", "recent", "tomtom_key", "traffic_layer", "filters"};
+    ohne Datei (erster Start) leer. filters bleiben auch fuer abgewaehlte Haltestellen
+    stehen - hakt man sie wieder an, gilt ihr Filter wieder."""
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -2126,9 +2356,11 @@ def load_settings():
         data = {}
     stops = [s for s in (clean_stop(s) for s in data.get("stops") or []) if s][:MAX_STOPS]
     key = str(data.get("tomtom_key") or "").strip()
+    filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+    filters = {str(k): r for k, r in ((k, clean_rules(v)) for k, v in filters.items()) if r}
     return {"home": clean_place(data.get("home")), "stops": stops, "prefix": str(data.get("prefix") or ""),
             "recent": [p for p in (clean_place(p) for p in data.get("recent") or []) if p][:RECENT_MAX],
-            "tomtom_key": key or None, "traffic_layer": bool(data.get("traffic_layer", True))}
+            "tomtom_key": key or None, "traffic_layer": bool(data.get("traffic_layer", True)), "filters": filters}
 
 
 def write_json(path, value, indent=None, private=False):
@@ -2242,6 +2474,8 @@ SYMBOLS = {
     "up": _SYMBOL % ('<path d="M3.5 10.25 L8 5.75 L12.5 10.25"/>', ""),
     "down": _SYMBOL % ('<path d="M3.5 5.75 L8 10.25 L12.5 5.75"/>', ""),
     "minus": _SYMBOL % ('<path d="M3 8 H13"/>', ""),
+    # Filter einer Haltestelle: Trichter
+    "filter": _SYMBOL % ('<path d="M2.5 3 H13.5 L9.25 8.25 V13 L6.75 11.75 V8.25 Z"/>', ""),
     "warning": _SYMBOL % ('<path d="M8 2.25 L14.25 13.25 H1.75 Z"/><path d="M8 6.5 V9.25"/>', _dots((8, 11.3), r=0.85)),
     # Umstieg: zwei Pfeile in entgegengesetzte Richtungen
     "change": _SYMBOL % ('<path d="M2.5 5.25 H12.5 M10 2.75 L12.5 5.25 L10 7.75"/>'
@@ -2366,10 +2600,11 @@ def menu_rows(settings, cache, state, now):
             note = "Loading…" if state == "cached" else "No departures yet"
             rows.append({"kind": "note", "text": note, "icon": "clock"})
             continue
+        rules = stop_rules(settings, stop)
         shown = 0
         for dep in reachable(board, stop, now):
             key = (dep.get("jid"), dep["planned"], dep.get("at")) if dep.get("jid") else (dep["line"], dep["planned"])
-            if key in seen:                     # dieselbe Abfahrt ueber zwei gewaehlte Haltestellen
+            if key in seen or dep_hidden(dep, rules):     # schon bei einer anderen Haltestelle, oder gefiltert
                 continue
             seen.add(key)
             rows.append({"kind": "dep", "dep": dep, "stop": i, "icon": dep["kind"]})
@@ -2377,10 +2612,16 @@ def menu_rows(settings, cache, state, now):
             if shown == quota:
                 break
         if not shown:
-            rows.append({"kind": "note", "icon": "clock",
-                         "text": "No more departures in the next %d min" % BOARD_MIN if state == "ok"
-                         else "No departures known"})
+            rows.append({"kind": "note", "icon": "clock", "text": no_departures(rules, state)})
     return rows
+
+
+def no_departures(rules, state="ok", more=True):
+    """Hinweis, wenn an einer Haltestelle nichts (mehr) faehrt - mit Filter: nichts davon."""
+    if state != "ok":
+        return "No departures known"
+    return "No %s in the next %d min" % ("chosen lines" if rules else "more departures" if more else "departures",
+                                         BOARD_MIN)
 
 
 def terminal_lines(settings, cache, state, now):
@@ -2523,6 +2764,7 @@ class Tray:
         self.slot_rows = []                 # Zeile je Slot, fuer den Klick
         self.tiles = TileCache()            # Kartenkacheln fuer beide Karten des Fensters
         self.tiles.key = self.settings.get("tomtom_key")
+        self.surveys = {}                   # stop_key -> (Zeit, Abfahrten): welche Linien dort fahren
 
         menu = Gtk.Menu()
         # Ueberschriften, Abfahrten und Hinweise teilen sich feste Plaetze ("Slots") -
@@ -2671,8 +2913,11 @@ class Tray:
         return POLL_METERED if self.metered() else POLL
 
     def upcoming(self):
+        """Faehrt noch etwas, das der Filter zeigt? Sonst fragt das Widget seltener."""
         now = time.time()
-        return any(eff_time(d) >= now for board in (self.cache or {}).get("boards") or [] for d in board)
+        stops = self.settings.get("stops") or []
+        return any(eff_time(d) >= now and not dep_hidden(d, stop_rules(self.settings, stop))
+                   for stop, board in zip(stops, (self.cache or {}).get("boards") or []) for d in board or [])
 
     def metered(self):
         """Getaktete Verbindung (NetworkManager: ja oder vermutlich ja) - etwa der Handy-Hotspot."""
@@ -2740,7 +2985,7 @@ class Tray:
                     stop["serve"], stop["learned"], stop["ids"] = learned[stop_key(stop)]
             save_settings(self.settings)
             if self.home_window:
-                self.home_window.serves_changed()
+                self.home_window.stops_changed()
         self.state = state
         if cache is not None:
             self.cache = cache
@@ -2809,6 +3054,60 @@ class Tray:
                 self.state = "cached"
                 self.refresh()
         self.render()
+        if self.home_window:
+            self.home_window.stops_changed()
+
+    def set_filter(self, key, rules):
+        """Welche Linien und Richtungen die Haltestelle key zeigt. Menue und Abfahrten
+        filtern sofort aus dem letzten Stand; die Abfrage danach holt groessere Tafeln,
+        falls nun zu wenig Gezeigtes dabei ist."""
+        filters = dict(self.settings.get("filters") or {})
+        if rules:
+            filters[key] = rules
+        else:
+            filters.pop(key, None)
+        self.settings["filters"] = filters
+        save_settings(self.settings)
+        self.render()
+        if self.home_window:
+            self.home_window.stops_changed()
+        if any(stop_key(s) == key for s in self.settings.get("stops") or []):
+            if self.busy:
+                self.again = True
+            else:
+                self.schedule(3)        # wer mehrere Haken setzt, loest eine Abfrage aus
+
+    def survey(self, stop, done):
+        """Welche Linien an der Haltestelle fahren (fuer den Filter): die Abfahrten der
+        naechsten Stunden, SURVEY_AGE lang gemerkt. done(Abfahrten oder None, Hinweis)."""
+        key = stop_key(stop)
+        known = self.surveys.get(key)
+        if known and time.time() - known[0] < SURVEY_AGE:
+            done(known[1], known[2])
+            return
+        stop = json.loads(json.dumps(stop))
+
+        def work():
+            try:
+                deps, missing = survey_lines(stop, time.time())
+                note = "No answer from %s - its lines may be missing." % ", ".join(
+                    SOURCE_NAMES.get(m, m) for m in missing) if missing else None
+            except Offline:
+                deps, note = None, "No connection - these are the lines known so far."
+            except NoResult:
+                deps, note = [], None
+            except Exception as exc:  # noqa: BLE001
+                log("line survey at %s failed: %s: %s" % (stop["name"], type(exc).__name__, exc))
+                deps, note = None, "The lines did not load - these are the ones known so far."
+            GLib.idle_add(finish, deps, note)
+
+        def finish(deps, note):
+            if deps is not None:
+                self.surveys[key] = (time.time(), deps, note)
+            done(deps, note)
+            return GLib.SOURCE_REMOVE
+
+        threading.Thread(target=work, daemon=True).start()
 
     def remember(self, place):
         """Ein gesuchtes Ziel vorn in die Liste der letzten Ziele."""
@@ -2943,6 +3242,19 @@ UI_CSS = """
 .tr-order .tr-glyph { color: alpha(@window_fg_color, 0.70); }
 .tr-order:hover .tr-glyph { color: @window_fg_color; }
 .tr-order:disabled .tr-glyph { color: alpha(@window_fg_color, 0.22); }
+.tr-order.tr-active .tr-glyph, .tr-order.tr-active:hover .tr-glyph { color: @accent_color; }
+.tr-chipbtn {
+    padding: 2px;
+    min-width: 0;
+    min-height: 0;
+    border-radius: 8px;
+    border: none;
+    background-image: none;
+    background-color: transparent;
+    box-shadow: none;
+}
+.tr-chipbtn:hover { background-color: alpha(@window_fg_color, 0.10); }
+.tr-filter { padding: 8px 6px 4px; }
 .tr-badge {
     border-radius: 6px;
     padding: 0 6px;
@@ -4071,6 +4383,7 @@ class TransitWindow:
         self.trip_serial = 0
         self.traffic_toggles = []
         self.views = []
+        self.line_filter = None         # offenes Filter-Popover einer Haltestelle
 
         win = self.window = Gtk.Window(title="Transit")
         win.set_default_size(1180, 720)
@@ -4635,15 +4948,17 @@ class TransitWindow:
         stops = settings.get("stops") or []
         self.dep_status.set_text(updated_line(cache, self.tray.state, now).replace(" · ", SEP)
                                  if stops else "")
-        # Nur neu aufbauen, wenn sich etwas geaendert hat - sonst springt die Liste
-        boards = (cache or {}).get("boards") or []
+        # Nur neu aufbauen, wenn sich etwas geaendert hat - sonst springt die Liste. Und
+        # nicht, solange der Filter einer Haltestelle offen ist: er haengt an ihrem Kopf.
+        boards = [board or [] for board in ((cache or {}).get("boards") or [])[:len(stops)]]
+        rules = [stop_rules(settings, stop) for stop in stops]
         shape = (bool(settings.get("home")), prefix, self.tray.busy, self.tray.state,
-                 tuple((stop_key(stop), stop.get("walk")) for stop in stops),
+                 tuple((stop_key(stop), stop.get("walk"), json.dumps(rule)) for stop, rule in zip(stops, rules)),
                  tuple(tuple((d.get("jid"), d["planned"], d.get("real"), d.get("cancelled"), d.get("platform"),
                               d in reachable(board, stops[i], now))
-                             for d in board if eff_time(d) >= now - 30)
-                       for i, board in enumerate(boards[:len(stops)])))
-        if shape == self.dep_shape:
+                             for d in board if eff_time(d) >= now - 30 and not dep_hidden(d, rules[i]))
+                       for i, board in enumerate(boards)))
+        if shape == self.dep_shape or self.line_filter is not None:
             return
         self.dep_shape = shape
         self.clear_list(self.dep_list)
@@ -4653,15 +4968,16 @@ class TransitWindow:
             self.dep_detail.message("No stops chosen yet.")
             return
         select = None
+        raw = (cache or {}).get("boards") or []
         for i, stop in enumerate(stops):
-            self.add_dep_head(self.stop_head(stop_title(stop, prefix), i, len(stops)))
-            board = boards[i] if i < len(boards) else None
+            self.add_dep_head(self.stop_head(stop, i, len(stops)))
+            board = raw[i] if i < len(raw) else None
             if board is None:
                 self.add_dep_note("Loading…" if self.tray.busy or self.tray.state == "cached" else "No departures yet.")
                 continue
-            ahead = [d for d in board if eff_time(d) >= now - 30]
+            ahead = [d for d in board if eff_time(d) >= now - 30 and not dep_hidden(d, rules[i])]
             if not ahead:
-                self.add_dep_note("No departures in the next %d min." % BOARD_MIN)
+                self.add_dep_note(no_departures(rules[i], more=False) + ".")
             reach = reachable(board, stop, now)
             for dep in ahead:
                 select = self.add_dep_row(dep, stop, dep not in reach, keep) or select
@@ -4671,11 +4987,19 @@ class TransitWindow:
         elif keep is None:
             self.dep_detail.message("Choose a departure to see its stops on the map.")
 
-    def stop_head(self, title, index, count):
-        """Kopf einer Haltestelle. Bei mehreren daneben Pfeile: damit rueckt sie nach oben
-        oder unten - hier und im Menue."""
+    def stop_head(self, stop, index, count):
+        """Kopf einer Haltestelle: Name, darunter der Fussweg; daneben der Trichter fuer
+        ihren Filter, bei mehreren Pfeile - damit rueckt sie nach oben oder unten, hier und
+        im Menue."""
+        prefix = self.tray.settings.get("prefix") or ""
         head = Gtk.Box(spacing=2)
-        head.pack_start(label(title, "tr-section", ellipsize=True), True, True, 0)
+        names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        names.pack_start(label(short_name(stop["name"], prefix), "tr-section", ellipsize=True), False, False, 0)
+        if stop.get("walk") is not None:
+            names.pack_start(label("%d min walk" % walk_minutes(stop["walk"]), "tr-sub", "dim-label"), False, False, 0)
+        head.pack_start(names, True, True, 0)
+        head.pack_start(filter_button(stop_rules(self.tray.settings, stop), prefix,
+                                      lambda button: self.open_filter(button, stop)), False, False, 0)
         if count < 2:
             return head
         for key, step, tip in (("up", -1, "Move this stop up"), ("down", 1, "Move this stop down")):
@@ -4688,6 +5012,16 @@ class TransitWindow:
             button.connect("clicked", lambda _b, s=step: GLib.idle_add(self.tray.move_stop, index, s))
             head.pack_start(button, False, False, 0)
         return head
+
+    def open_filter(self, button, stop):
+        if self.line_filter is not None:
+            self.line_filter.close()
+        self.line_filter = LineFilter(self.tray, stop, button, self.filter_closed)
+
+    def filter_closed(self):
+        self.line_filter = None
+        if self.window is not None:
+            self.departures_changed()   # jetzt mit dem neuen Filter
 
     def add_dep_head(self, widget):
         head = Gtk.ListBoxRow(activatable=False, selectable=False)
@@ -4767,6 +5101,9 @@ class TransitWindow:
 
     def on_key(self, _win, event):
         if event.keyval == Gdk.KEY_Escape:
+            if self.line_filter is not None:
+                self.line_filter.close()
+                return True
             for entry in (self.from_entry, self.to_entry):
                 if entry.popover.get_visible():
                     entry.popover.popdown()
@@ -4778,6 +5115,7 @@ class TransitWindow:
     def on_destroy(self, _win):
         GLib.source_remove(self.tick)
         self.window = None
+        self.line_filter = None
         for view in self.views:
             if view in self.tray.tiles.views:
                 self.tray.tiles.views.remove(view)
@@ -5176,11 +5514,191 @@ def open_uri(url):
         log("could not open %s: %s" % (url, exc.message))
 
 
+# ------------------------------------------------------------------ Filter: Linien und Richtungen
+
+FILTER_W = 330          # Breite des Filter-Popovers
+FILTER_LIST_H = 440     # Hoehe seiner Liste hoechstens
+FILTER_CHROME = 230     # Titel, Hinweis, Fuss und Abstand zum Fensterrand
+
+
+def cached_board(cache, key):
+    """Die Abfahrten der Haltestelle key im letzten Stand (oder None)."""
+    stops, boards = (cache or {}).get("stops") or [], (cache or {}).get("boards") or []
+    return boards[stops.index(key)] if key in stops and stops.index(key) < len(boards) else None
+
+
+def filter_button(rules, prefix, callback):
+    """Der Trichter neben einer Haltestelle oeffnet ihren Filter - tuerkis, solange er
+    etwas weglaesst."""
+    button = styled(Gtk.Button(), "tr-order", "tr-active" if rules else None)
+    button.add(icon("filter", 14))
+    button.set_tooltip_text("Hidden: %s" % filter_text(rules, prefix) if rules else "Choose lines and directions")
+    button.set_valign(Gtk.Align.CENTER)
+    button.connect("clicked", callback)
+    return button
+
+
+class LineFilter:
+    """Popover am Trichter einer Haltestelle: welche Linien und Richtungen Menue und
+    Abfahrten zeigen. Abgehakt heisst weggelassen; was neu dazukommt, steht da, bis man
+    es abhakt. Zuerst die Linien aus dem letzten Stand, dann alle der naechsten Stunden
+    (Tray.survey). Ein Klick auf die Linie schaltet alle ihre Richtungen.
+    Popover ragen unter GTK3 nicht ueber ihr Fenster hinaus: side ist die Seite mit Platz
+    (in "Home & stops" links ueber der Liste, unter Departures rechts ueber der Karte),
+    die Hoehe richtet sich nach dem Fenster."""
+
+    def __init__(self, tray, stop, anchor, closed=None, side="right"):
+        self.tray, self.stop, self.key, self.closed = tray, stop, stop_key(stop), closed
+        self.deps = list(cached_board(tray.cache, self.key) or [])
+        self.rows = []                  # (Linie, Kaestchen, Knopf, [(Haken, Richtung, Text)])
+        self.quiet = False              # True, waehrend sync die Haken setzt
+        self.popover = styled(Gtk.Popover(relative_to=anchor), "tr-popover")
+        self.popover.set_position(Gtk.PositionType.LEFT if side == "left" else Gtk.PositionType.RIGHT)
+        self.popover.connect("closed", self.on_closed)
+        self.popover.connect("destroy", self.on_destroyed)
+        # Breite fest: umbrechende Labels melden sonst die ganze Zeile als Wunschbreite, das
+        # Popover wuerde breiter als das Fenster und links abgeschnitten
+        box = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), "tr-filter")
+        box.set_size_request(FILTER_W, -1)
+        prefix = tray.settings.get("prefix") or ""
+        title = label(short_name(stop["name"], prefix), "tr-section", ellipsize=True)
+        hint = label("Untick what the menu and Departures should leave out. New lines and destinations "
+                     "show up until you untick them.", "tr-sub", "dim-label", wrap=True)
+        for widget, chars in ((title, 30), (hint, 44)):
+            widget.set_max_width_chars(chars)
+            box.pack_start(widget, False, False, 0)
+        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                      vscrollbar_policy=Gtk.PolicyType.AUTOMATIC)
+        scroller.set_propagate_natural_height(True)
+        room = anchor.get_toplevel().get_allocated_height() - FILTER_CHROME
+        scroller.set_max_content_height(max(160, min(FILTER_LIST_H, room)))
+        self.grid = Gtk.Grid(column_spacing=12, row_spacing=8)
+        scroller.add(self.grid)
+        box.pack_start(scroller, True, True, 0)
+        foot = Gtk.Box(spacing=8)
+        self.note = label("Looking for all lines here…", "tr-sub", "dim-label", wrap=True)
+        self.note.set_max_width_chars(30)
+        foot.pack_start(self.note, True, True, 0)
+        self.reset = Gtk.Button(label="Show all")
+        self.reset.set_valign(Gtk.Align.CENTER)
+        self.reset.connect("clicked", self.on_reset)
+        foot.pack_end(self.reset, False, False, 0)
+        box.pack_start(foot, False, False, 0)
+        self.popover.add(box)
+        box.show_all()
+        self.fill()
+        tray.survey(stop, self.surveyed)
+        self.popover.popup()
+
+    def rules(self):
+        return stop_rules(self.tray.settings, self.stop)
+
+    def fill(self):
+        for child in self.grid.get_children():
+            child.destroy()
+        self.rows = []
+        prefix = self.tray.settings.get("prefix") or ""
+        groups = line_groups(self.deps, self.rules())
+        if not groups:
+            self.grid.attach(label("No lines known here yet.", "dim-label"), 0, 0, 2, 1)
+        for n, group in enumerate(groups):
+            box = chip(group["kind"], group["line"])
+            button = styled(Gtk.Button(), "tr-chipbtn")
+            button.add(box)
+            button.set_valign(Gtk.Align.START)
+            button.set_halign(Gtk.Align.START)
+            button.connect("clicked", self.on_line, group)
+            self.grid.attach(button, 0, n, 1, 1)
+            column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            checks = []
+            # Linie ganz aus und gerade ohne Fahrt: ein Haken fuer alle Richtungen
+            for direction in group["dirs"] or [None]:
+                text = label(" · ".join(short_name(t, prefix) for t in direction["towards"]) if direction
+                             else "all directions", wrap=True)
+                text.set_max_width_chars(30)
+                check = Gtk.CheckButton()
+                check.add(text)
+                check.connect("toggled", self.on_direction, group, direction)
+                column.pack_start(check, False, False, 0)
+                checks.append((check, direction, text))
+            self.grid.attach(column, 1, n, 1, 1)
+            self.rows.append((group, box, button, checks))
+        self.grid.show_all()
+        self.sync()
+
+    def sync(self):
+        """Haken, graue Kaestchen und "Show all" nach den Regeln - ohne die Liste neu zu bauen."""
+        rules = self.rules()
+        self.reset.set_sensitive(bool(rules))
+        for group, box, button, checks in self.rows:
+            off = line_hidden(rules, group["line"]) or bool(group["dirs"]) and all(
+                direction_hidden(rules, group, d) for d in group["dirs"])
+            ctx = box.get_style_context()
+            (ctx.add_class if off else ctx.remove_class)("tr-cancelled")
+            button.set_tooltip_text("%s all of line %s" % ("Show" if off else "Hide", group["line"]))
+            for check, direction, text in checks:
+                active = not off if direction is None else not direction_hidden(rules, group, direction)
+                if check.get_active() != active:
+                    self.quiet = True
+                    check.set_active(active)
+                    self.quiet = False
+                ctx = text.get_style_context()
+                (ctx.remove_class if active else ctx.add_class)("dim-label")
+
+    def on_direction(self, check, group, direction):
+        if self.quiet:
+            return
+        if direction is None:
+            rules = toggle_line(self.rules(), group, check.get_active())
+        else:
+            rules = toggle_direction(self.rules(), group, direction, check.get_active())
+        self.tray.set_filter(self.key, rules)
+        self.sync()
+
+    def on_line(self, _button, group):
+        rules = self.rules()
+        off = line_hidden(rules, group["line"]) or bool(group["dirs"]) and all(
+            direction_hidden(rules, group, d) for d in group["dirs"])
+        self.tray.set_filter(self.key, toggle_line(rules, group, off))
+        self.sync()
+
+    def on_reset(self, _button):
+        self.tray.set_filter(self.key, [])
+        self.sync()
+
+    def surveyed(self, deps, note):
+        if self.popover is None:
+            return
+        if deps is not None:
+            self.deps = list(deps) + self.deps
+        self.note.set_text(note or "Lines running in the next %d hours." % (SURVEY_MIN // 60))
+        self.fill()
+
+    def close(self):
+        if self.popover is not None:
+            self.popover.popdown()
+
+    def on_closed(self, popover):
+        if self.popover is None:
+            return
+        self.popover = None
+        GLib.idle_add(popover.destroy)
+        if self.closed:
+            self.closed()
+
+    def on_destroyed(self, _popover):
+        if self.popover is not None:    # mit dem Fenster zu
+            self.popover = None
+            if self.closed:
+                self.closed()
+
+
 # ------------------------------------------------------------------ Zuhause und Haltestellen
 
 class HomeWindow:
     """Zuhause suchen und waehlen, dann die Haltestellen in der Naehe an- und abwaehlen.
-    Jede Aenderung gilt sofort."""
+    Die gewaehlten stehen oben in der Reihenfolge des Menues, mit Pfeilen zum Umsortieren
+    und dem Trichter fuer ihren Filter. Jede Aenderung gilt sofort."""
 
     def __init__(self, tray):
         prepare_ui()
@@ -5188,7 +5706,9 @@ class HomeWindow:
         self.serial = 0
         self.places = []
         self.nearby = []                # Haltestellen in der Naehe, nach Gehzeit
-        self.checks = []                # (CheckButton, Haltestelle)
+        self.checks = {}                # Zeile -> (CheckButton, Haltestelle), in Listenreihenfolge
+        self.line_filter = None         # offenes Filter-Popover
+        self.stale = False              # Liste neu bauen, sobald der Filter zu ist
 
         win = self.window = Gtk.Window(title="Transit Home")
         win.set_default_size(480, 780)
@@ -5221,10 +5741,10 @@ class HomeWindow:
         body.pack_start(self.status, False, False, 0)
 
         body.pack_start(label("Stops nearby", "tr-section"), False, False, 0)
-        body.pack_start(label("The menu shows departures from the stops you tick (up to %d). Walking time "
-                              "counts: what you cannot reach on foot is left out. The arrows next to a stop "
-                              "under Departures set which comes first." % MAX_STOPS,
-                              "tr-sub", "dim-label", wrap=True), False, False, 0)
+        body.pack_start(label("The menu shows departures from the stops you tick (up to %d), in the order "
+                              "listed here: the arrows move a stop up or down, the funnel picks its lines and "
+                              "directions. Walking time counts: what you cannot reach on foot is left out."
+                              % MAX_STOPS, "tr-sub", "dim-label", wrap=True), False, False, 0)
         self.abroad = label("", "tr-sub", "dim-label", wrap=True)
         self.abroad.set_markup('Outside Austria, stops and timetables come from <a href="%s">Transitous</a> - '
                                'the open data of the operators, with live times where they share them.'
@@ -5247,7 +5767,12 @@ class HomeWindow:
                               wrap=True), False, False, 0)
         keyrow = Gtk.Box(spacing=8)
         self.key_entry = Gtk.Entry(placeholder_text="Paste your TomTom API key", hexpand=True)
+        # Verdeckt wie ein Passwort (Kopieren geht dann nicht), das Auge zeigt ihn
+        self.key_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        self.key_entry.set_property("caps-lock-warning", False)
         self.key_entry.set_text(self.tray.settings.get("tomtom_key") or "")
+        self.show_key(False)
+        self.key_entry.connect("icon-press", lambda entry, _pos, _event: self.show_key(not entry.get_visibility()))
         self.key_entry.connect("activate", self.on_check_key)
         keyrow.pack_start(self.key_entry, True, True, 0)
         self.key_button = Gtk.Button(label="Save")
@@ -5407,72 +5932,138 @@ class HomeWindow:
         return GLib.SOURCE_REMOVE
 
     def show_stops(self):
+        """Oben die gewaehlten in der Reihenfolge des Menues, darunter die anderen nach Gehzeit."""
+        if self.line_filter is not None:
+            self.stale = True           # das offene Popover haengt an einer Zeile
+            return
+        self.stale = False
         for child in self.stop_list.get_children():
             child.destroy()
-        self.checks = []
-        settings = self.tray.settings
-        chosen = {stop_key(s): s for s in settings.get("stops") or []}
-        prefix = settings.get("prefix") or ""
-        for stop in self.nearby:
-            box = Gtk.Box(spacing=10)
-            check = Gtk.CheckButton()
-            check.set_active(stop_key(stop) in chosen)
-            check.set_valign(Gtk.Align.CENTER)
-            box.pack_start(check, False, False, 0)
-            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-            text.pack_start(label(short_name(stop["name"], prefix), "tr-name", ellipsize=True), False, False, 0)
-            parts = []
-            if stop.get("walk") is not None:
-                parts.append("%d min walk" % walk_minutes(stop["walk"]))
-            if stop.get("distance") is not None:
-                parts.append(distance_text(stop["distance"]))
-            text.pack_start(label(" · ".join(parts), "tr-sub", "dim-label"), False, False, 0)
-            # Woher die Abfahrten kommen: gelernt (gewaehlt), sonst wer die Haltestelle kennt
-            known = chosen.get(stop_key(stop)) or stop
-            sources = known.get("serve") or [k for k in ("wl", "linzag", "oebb", "vor", "ooevv")
-                                             if k in (stop.get("ids") or {})]
-            badges = Gtk.Box(spacing=4)
-            for source in sources:
-                badges.pack_start(styled(label(SOURCE_NAMES[source]), "tr-badge", "dim-label"), False, False, 0)
-            text.pack_start(badges, False, False, 2)
-            box.pack_start(text, True, True, 0)
-            kinds = Gtk.Box(spacing=4)
-            for kind in stop.get("kinds") or []:
-                image = icon(kind, 16, "dim-label")
-                image.set_tooltip_text(KIND_NAMES[kind])
-                kinds.pack_start(image, False, False, 0)
-            box.pack_end(kinds, False, False, 0)
-            row = Gtk.ListBoxRow()
-            row.add(box)
-            self.stop_list.add(row)
-            self.checks.append((check, stop))
-            check.connect("toggled", self.on_toggle)
+        self.checks = {}
+        chosen = list(self.tray.settings.get("stops") or [])
+        keys = {stop_key(s) for s in chosen}
+        others = [s for s in self.nearby if stop_key(s) not in keys]
+        if chosen and others:
+            self.stop_head("In the menu")
+        for index, stop in enumerate(chosen):
+            self.stop_row(stop, index, len(chosen))
+        if chosen and others:
+            self.stop_head("More stops nearby")
+        for stop in others:
+            self.stop_row(stop)
         self.stop_list.show_all()
         self.limit_checks()
 
+    def stop_head(self, text):
+        row = styled(Gtk.ListBoxRow(activatable=False, selectable=False), "tr-head")
+        row.add(label(text, "tr-sub", "dim-label"))
+        self.stop_list.add(row)
+
+    def stop_row(self, stop, index=None, count=0):
+        """Eine Haltestelle; index: ihr Platz im Menue (gewaehlt), sonst None."""
+        settings = self.tray.settings
+        prefix = settings.get("prefix") or ""
+        box = Gtk.Box(spacing=10)
+        check = Gtk.CheckButton()
+        check.set_active(index is not None)
+        check.set_valign(Gtk.Align.CENTER)
+        box.pack_start(check, False, False, 0)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        text.pack_start(label(short_name(stop["name"], prefix), "tr-name", ellipsize=True), False, False, 0)
+        parts = []
+        if stop.get("walk") is not None:
+            parts.append("%d min walk" % walk_minutes(stop["walk"]))
+        if stop.get("distance") is not None:
+            parts.append(distance_text(stop["distance"]))
+        text.pack_start(label(" · ".join(parts), "tr-sub", "dim-label"), False, False, 0)
+        # Woher die Abfahrten kommen: gelernt (gewaehlt), sonst wer die Haltestelle kennt
+        sources = stop.get("serve") or [k for k in ("wl", "linzag", "oebb", "vor", "ooevv")
+                                        if k in (stop.get("ids") or {})]
+        badges = Gtk.Box(spacing=4)
+        for source in sources:
+            badges.pack_start(styled(label(SOURCE_NAMES[source]), "tr-badge", "dim-label"), False, False, 0)
+        text.pack_start(badges, False, False, 2)
+        rules = stop_rules(settings, stop) if index is not None else []
+        if rules:
+            hidden = label("Hidden: " + filter_text(rules, prefix), "tr-sub", "dim-label", ellipsize=True)
+            hidden.set_tooltip_text(filter_text(rules, prefix))
+            text.pack_start(hidden, False, False, 0)
+        box.pack_start(text, True, True, 0)
+        # Trichter und Pfeile; bei den anderen bleibt der Platz frei, die Symbole stehen buendig
+        tools = Gtk.Box(spacing=2)
+        tools.set_size_request(3 * 26 + 2 * 2, -1)
+        if index is not None:
+            tools.pack_start(filter_button(rules, prefix, lambda button: self.open_filter(button, stop)),
+                             False, False, 0)
+            for key, step, tip in (("up", -1, "Move this stop up"), ("down", 1, "Move this stop down")):
+                if count < 2:
+                    break
+                button = styled(Gtk.Button(), "tr-order")
+                button.add(icon(key, 14))
+                button.set_tooltip_text(tip)
+                button.set_valign(Gtk.Align.CENTER)
+                button.set_sensitive(0 <= index + step < count)
+                # erst nach dem Klick: die Liste wird dabei neu aufgebaut, samt diesem Knopf
+                button.connect("clicked", lambda _b, s=step: GLib.idle_add(self.tray.move_stop, index, s))
+                tools.pack_start(button, False, False, 0)
+        box.pack_end(tools, False, False, 0)
+        kinds = Gtk.Box(spacing=4)
+        for kind in stop.get("kinds") or []:
+            image = icon(kind, 16, "dim-label")
+            image.set_tooltip_text(KIND_NAMES[kind])
+            kinds.pack_start(image, False, False, 0)
+        box.pack_end(kinds, False, False, 0)
+        row = Gtk.ListBoxRow()
+        row.add(box)
+        self.stop_list.add(row)
+        self.checks[row] = (check, stop)
+        check.connect("toggled", self.on_toggle)
+
     def on_stop_row(self, _list, row):
-        index = row.get_index()
-        if 0 <= index < len(self.checks):
-            check = self.checks[index][0]
-            if check.get_sensitive():
-                check.set_active(not check.get_active())
+        check = (self.checks.get(row) or (None, None))[0]
+        if check is not None and check.get_sensitive():
+            check.set_active(not check.get_active())
 
     def on_toggle(self, _check):
-        """Die gewaehlten bleiben in ihrer Reihenfolge, neu abgehakte kommen ans Ende."""
-        ticked = [stop for check, stop in self.checks if check.get_active()]
+        """Die gewaehlten bleiben in ihrer Reihenfolge, neu abgehakte kommen ans Ende. Danach
+        steht die Liste neu: abgehakte oben, die anderen darunter."""
+        ticked = [stop for check, stop in self.checks.values() if check.get_active()]
         keys = {stop_key(stop) for stop in ticked}
         stops = [dict(s) for s in self.tray.settings.get("stops") or [] if stop_key(s) in keys]
         known = {stop_key(s) for s in stops}
         stops = (stops + [dict(stop) for stop in ticked if stop_key(stop) not in known])[:MAX_STOPS]
         self.tray.settings_changed(dict(self.tray.settings, stops=stops))
         self.limit_checks()
+        GLib.idle_add(self.restack)
 
-    def serves_changed(self):
-        """Das Widget hat gelernt, welche Betreiber an den Haltestellen fahren."""
+    def restack(self):
         if self.window is not None and self.checks:
+            self.show_stops()
+        return GLib.SOURCE_REMOVE
+
+    def stops_changed(self):
+        """Reihenfolge, Filter oder die gelernten Betreiber haben sich geaendert."""
+        if self.window is not None and (self.checks or self.stale):
+            self.show_stops()
+
+    def open_filter(self, button, stop):
+        if self.line_filter is not None:
+            self.line_filter.close()
+        self.line_filter = LineFilter(self.tray, stop, button, self.filter_closed, side="left")
+
+    def filter_closed(self):
+        self.line_filter = None
+        if self.window is not None and self.stale:
             self.show_stops()
 
     # -- TomTom
+
+    def show_key(self, visible):
+        """Den Schluessel zeigen oder verdecken - das Auge rechts im Feld."""
+        where = Gtk.EntryIconPosition.SECONDARY
+        self.key_entry.set_visibility(visible)
+        self.key_entry.set_icon_from_icon_name(where, "view-conceal-symbolic" if visible else "view-reveal-symbolic")
+        self.key_entry.set_icon_tooltip_text(where, "Hide the key" if visible else "Show the key")
 
     def show_key_state(self):
         key = self.tray.settings.get("tomtom_key")
@@ -5501,22 +6092,27 @@ class HomeWindow:
         else:
             self.tray.settings_changed(dict(self.tray.settings, tomtom_key=key))
             self.key_status.set_text("Key works - live traffic is on.")
+            self.show_key(False)
         return GLib.SOURCE_REMOVE
 
     def limit_checks(self):
         """Hoechstens MAX_STOPS - sonst wird das Menue zu lang."""
-        full = sum(1 for check, _s in self.checks if check.get_active()) >= MAX_STOPS
-        for check, _stop in self.checks:
+        full = sum(1 for check, _s in self.checks.values() if check.get_active()) >= MAX_STOPS
+        for check, _stop in self.checks.values():
             check.set_sensitive(check.get_active() or not full)
 
     def on_key(self, _win, event):
         if event.keyval == Gdk.KEY_Escape:
-            self.window.destroy()
+            if self.line_filter is not None:
+                self.line_filter.close()
+            else:
+                self.window.destroy()
             return True
         return False
 
     def on_destroy(self, _win):
         self.window = None
+        self.line_filter = None
         self.tray.home_closed()
 
 
