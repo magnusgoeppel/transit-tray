@@ -240,7 +240,8 @@ LATER_SLACK = 3 * 60
 LATER_SLACK_WAIT = 5 * 60
 WAIT_GAIN = 10 * 60
 BETTER_BY = 2 * 60
-WALK_GAIN = 3 * 60      # Oeffis muessen so viel schneller sein als der ganze Weg zu Fuss ...
+MORE_ON_FOOT = 2 * 60   # s: so viel mehr Fussweg (und Rad) darf "nicht frueher los, nicht spaeter da" haben
+WALK_GAIN = 3 * 60     # Oeffis muessen so viel schneller sein als der ganze Weg zu Fuss ...
 WALK_SAVE = 5 * 60      # ... oder so viel Fussweg sparen (bzw. WALK_SAVE_SHARE davon)
 WALK_SAVE_SHARE = 0.4
 # Rad + Oeffis (Bike & Ride): mit dem Rad zur Haltestelle, hoechstens MIXED_BIKE_MAX und
@@ -2158,15 +2159,19 @@ def usable(con):
 
 def outdone(con, other):
     """Ist other die sinnvollere Wahl als con? Ja, wenn other nicht frueher losgeht und
-    nicht spaeter ankommt, ohne mehr Umstiege - oder wenn other hoechstens EARLIER_SLACK
-    frueher losgeht, hoechstens LATER_SLACK (bzw. LATER_SLACK_WAIT) spaeter ankommt und
-    klar weniger Aufwand ist. So fallen weg: 20 Minuten frueher los, um 3 Minuten frueher
-    da zu sein; ein Umstieg mehr fuer eine Minute; 25 Minuten Fussweg statt der Bim."""
+    nicht spaeter ankommt, ohne mehr Umstiege und ohne viel mehr Fussweg (MORE_ON_FOOT) -
+    oder wenn other hoechstens EARLIER_SLACK frueher losgeht, hoechstens LATER_SLACK (bzw.
+    LATER_SLACK_WAIT) spaeter ankommt und klar weniger Aufwand ist. So fallen weg: 20
+    Minuten frueher los, um 3 Minuten frueher da zu sein; ein Umstieg mehr fuer eine
+    Minute; 25 Minuten Fussweg statt der Bim."""
     if other is con or not usable(other):
         return False
     dep, arr = eff_time(con, "dep"), eff_time(con, "arr")
     o_dep, o_arr = eff_time(other, "dep"), eff_time(other, "arr")
+    # ohne die Grenze beim Fussweg schloessen sich zwei Verbindungen gegenseitig aus: eine
+    # Minute frueher da, aber eine Viertelstunde mehr zu Fuss - und umgekehrt der Aufwand
     if o_dep >= dep and o_arr <= arr and other["changes"] <= con["changes"] \
+            and walked(other) + cycled(other) <= walked(con) + cycled(con) + MORE_ON_FOOT \
             and (o_dep > dep or o_arr < arr or other["changes"] < con["changes"]):
         return True
     slack = LATER_SLACK_WAIT if o_dep - dep >= WAIT_GAIN else LATER_SLACK
@@ -2187,6 +2192,8 @@ def sensible(cons, walk=None):
     unique = list({con_key(c): c for c in cons}.values())
     pool = [c for c in unique if usable(c)] or unique
     keep = [c for c in pool if not any(outdone(c, o) for o in pool)]
+    if pool and not keep:               # sortieren sie sich doch reihum aus: die mit dem wenigsten Aufwand
+        keep = [min(pool, key=effort)]
     if walk and keep and all(walk_instead(c, walk) for c in keep):
         quick = "quicker" if walk <= min(con_duration(c) for c in keep) else "about as quick"
         return [], "Walking is %s (%s) - no need for transit." % (quick, duration_text(walk))
