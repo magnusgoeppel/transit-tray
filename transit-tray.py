@@ -175,7 +175,7 @@ MAP_CREDITS = {"basemap": "basemap.at", "osm": "© OpenStreetMap contributors"}
 
 APP_URL = "https://github.com/magnusgoeppel/transit-tray"
 # Transitous und die OpenStreetMap-Kacheln verlangen Name, Version und Kontakt
-HEADERS = {"Accept": "application/json", "Accept-Encoding": "gzip", "User-Agent": "transit-tray/3.1 (+%s)" % APP_URL}
+HEADERS = {"Accept": "application/json", "Accept-Encoding": "gzip", "User-Agent": "transit-tray/3.2 (+%s)" % APP_URL}
 TIMEOUT = 20
 
 # Abfragen
@@ -227,6 +227,38 @@ SLOTS = 16              # Zeilen ueber dem Trenner (Ueberschriften, Abfahrten, H
 RECENT_MAX = 6          # zuletzt gesuchte Ziele
 TRIPS = 5               # Verbindungen je Suche
 ENRICH_LEGS = 3         # so viele Etappen je Suche bekommen Echtzeit vom Betreiber nachgeholt
+
+# Welche Verbindungen sinnvoll sind (Zeiten in Sekunden). Zwei aehnliche Verbindungen
+# vergleicht der "Aufwand": Dauer, je Umstieg CHANGE_COST dazu, Fussweg und Rad zu
+# EFFORT_FACTOR. Eine andere ersetzt eine Verbindung, wenn sie hoechstens EARLIER_SLACK
+# frueher losgeht, hoechstens LATER_SLACK spaeter ankommt (LATER_SLACK_WAIT, wenn man
+# dafuer WAIT_GAIN spaeter losgeht) und BETTER_BY weniger Aufwand ist.
+CHANGE_COST = 5 * 60
+EFFORT_FACTOR = 0.5
+EARLIER_SLACK = 3 * 60
+LATER_SLACK = 3 * 60
+LATER_SLACK_WAIT = 5 * 60
+WAIT_GAIN = 10 * 60
+BETTER_BY = 2 * 60
+WALK_GAIN = 3 * 60      # Oeffis muessen so viel schneller sein als der ganze Weg zu Fuss ...
+WALK_SAVE = 5 * 60      # ... oder so viel Fussweg sparen (bzw. WALK_SAVE_SHARE davon)
+WALK_SAVE_SHARE = 0.4
+# Rad + Oeffis (Bike & Ride): mit dem Rad zur Haltestelle, hoechstens MIXED_BIKE_MAX und
+# mindestens MIXED_BIKE_MIN (kuerzer geht man zu Fuss). Gezeigt nur, wenn es MIXED_GAIN
+# (bzw. MIXED_GAIN_SHARE) schneller ist als Oeffis allein und als die ganze Strecke mit
+# dem Rad. Naeher als MIXED_NEAR_M faehrt man ganz mit dem Rad - dann keine Abfrage.
+MIXED_BIKE_MAX = 20 * 60
+MIXED_BIKE_MIN = 3 * 60
+MIXED_GAIN = 5 * 60
+MIXED_GAIN_SHARE = 0.15
+MIXED_NEAR_M = 1500
+# Autorouten: die schnellste und Alternativen, die hoechstens ALT_SLOWER (bzw.
+# ALT_SLOWER_SHARE) langsamer sind und zu weniger als ALT_SHARED ueber dieselben
+# Strassen fuehren wie eine schnellere - zusammen hoechstens ALT_MAX.
+ALT_MAX = 3
+ALT_SLOWER = 5 * 60
+ALT_SLOWER_SHARE = 0.15
+ALT_SHARED = 0.7
 
 _CONFIG = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
 SETTINGS_FILE = os.path.join(_CONFIG, "transit-tray", "settings.json")
@@ -1068,12 +1100,12 @@ def parse_motis_itinerary(it):
                         dep_platform=dep_pl, dep_platform_changed=dep_new, arr_platform=arr_pl,
                         arr_platform_changed=arr_new, reachable=True, jid=leg.get("tripId"),
                         rt_source=SOURCE_NAMES["motis"] if live else None)
-        else:                                   # zu Fuss - auch die Wege beim Umsteigen
+        else:                                   # zu Fuss (auch beim Umsteigen) oder mit dem Rad
             dep, arr = iso_time(leg.get("startTime")), iso_time(leg.get("endTime"))
             if dep is None or arr is None:
                 continue
             meters = leg.get("distance")
-            item.update(type="walk", dep=dep, dep_real=None, arr=arr, arr_real=None,
+            item.update(type="bike" if mode == "BIKE" else "walk", dep=dep, dep_real=None, arr=arr, arr_real=None,
                         duration=float(leg.get("duration") or arr - dep),
                         distance=round(meters) if isinstance(meters, (int, float)) and meters >= 1 else None,
                         path=path if len(path) >= 2 else [c for c in (item["from_coord"], item["to_coord"]) if c])
@@ -2015,6 +2047,30 @@ def transit_search(origin, destination, when=None, context=None, planner=None):
     return {"cons": cons, "later": later, "earlier": earlier, "planner": planner}
 
 
+def mixed_search(origin, destination, when=None):
+    """Rad + Oeffis (Bike & Ride): mit dem eigenen Rad zu einer Haltestelle, dort parken,
+    weiter mit Oeffis. Welche Haltestelle sich lohnt, rechnet Transitous (die Planer der
+    Betreiber koennen das nicht) - Rad hoechstens MIXED_BIKE_MAX, dazu die Dauer der
+    ganzen Strecke mit dem Rad. -> {"cons", "bike" (Sekunden oder None), "planner"}"""
+    if distance_m(origin["latitude"], origin["longitude"],
+                  destination["latitude"], destination["longitude"]) < MIXED_NEAR_M:
+        raise NoResult("This close, cycling all the way is quicker.")
+    moment, arrive = when if when else (time.time(), False)
+    data = motis("/v6/plan", [("fromPlace", motis_point(origin)), ("toPlace", motis_point(destination)),
+                              ("time", motis_utc(moment)), ("arriveBy", "true" if arrive else "false"),
+                              ("preTransitModes", "BIKE"), ("maxPreTransitTime", str(MIXED_BIKE_MAX)),
+                              ("directModes", "BIKE"), ("numItineraries", str(TRIPS)),
+                              ("maxItineraries", str(TRIPS + 3)), ("language", "de")])
+    data = data if isinstance(data, dict) else {}
+    cons = [c for c in (parse_motis_itinerary(it) for it in data.get("itineraries") or []) if c and cycled(c)]
+    direct = [it.get("duration") for it in data.get("direct") or []
+              if isinstance(it, dict) and isinstance(it.get("duration"), (int, float))]
+    if not cons:
+        raise NoResult("No connection with bike and transit found.")
+    enrich_realtime(cons, "motis", time.time())
+    return {"cons": cons, "bike": float(min(direct)) if direct else None, "planner": "motis"}
+
+
 _STOP_IDS = {}
 
 
@@ -2076,24 +2132,86 @@ def con_key(con):
     return tuple((l["type"], l.get("line"), l["dep"]) for l in con["legs"])
 
 
-def pareto(cons):
-    """Verbindungen ohne die, die frueher losgehen und trotzdem nicht frueher ankommen
-    als eine andere (ohne mehr Umstiege) - so wie ein Mensch sie aussortiert. Nach
-    Abfahrt sortiert."""
-    def dep(c):
-        return eff_time(c, "dep")
+def con_duration(con):
+    return eff_time(con, "arr") - eff_time(con, "dep")
 
-    def arr(c):
-        return eff_time(c, "arr")
 
-    keep = []
-    for c in cons:
-        beaten = any(o is not c and not o["cancelled"] and o["reachable"] and dep(o) >= dep(c) and arr(o) <= arr(c)
-                     and o["changes"] <= c["changes"]
-                     and (dep(o) > dep(c) or arr(o) < arr(c) or o["changes"] < c["changes"]) for o in cons)
-        if not beaten:
-            keep.append(c)
-    return sorted(keep, key=lambda c: (dep(c), arr(c)))
+def walked(con):
+    """Sekunden zu Fuss in einer Verbindung, auch beim Umsteigen."""
+    return sum(l.get("duration") or 0 for l in con["legs"] if l["type"] == "walk")
+
+
+def cycled(con):
+    """Sekunden mit dem Rad in einer Verbindung."""
+    return sum(l.get("duration") or 0 for l in con["legs"] if l["type"] == "bike")
+
+
+def effort(con):
+    """Wie aufwendig eine Verbindung ist: ihre Dauer, je Umstieg CHANGE_COST dazu, Fussweg
+    und Rad zu EFFORT_FACTOR - so waegt ein Mensch zwei aehnliche Verbindungen ab."""
+    return con_duration(con) + CHANGE_COST * con["changes"] + EFFORT_FACTOR * (walked(con) + cycled(con))
+
+
+def usable(con):
+    return not con["cancelled"] and con["reachable"]
+
+
+def outdone(con, other):
+    """Ist other die sinnvollere Wahl als con? Ja, wenn other nicht frueher losgeht und
+    nicht spaeter ankommt, ohne mehr Umstiege - oder wenn other hoechstens EARLIER_SLACK
+    frueher losgeht, hoechstens LATER_SLACK (bzw. LATER_SLACK_WAIT) spaeter ankommt und
+    klar weniger Aufwand ist. So fallen weg: 20 Minuten frueher los, um 3 Minuten frueher
+    da zu sein; ein Umstieg mehr fuer eine Minute; 25 Minuten Fussweg statt der Bim."""
+    if other is con or not usable(other):
+        return False
+    dep, arr = eff_time(con, "dep"), eff_time(con, "arr")
+    o_dep, o_arr = eff_time(other, "dep"), eff_time(other, "arr")
+    if o_dep >= dep and o_arr <= arr and other["changes"] <= con["changes"] \
+            and (o_dep > dep or o_arr < arr or other["changes"] < con["changes"]):
+        return True
+    slack = LATER_SLACK_WAIT if o_dep - dep >= WAIT_GAIN else LATER_SLACK
+    return o_dep >= dep - EARLIER_SLACK and o_arr <= arr + slack and effort(other) + BETTER_BY <= effort(con)
+
+
+def walk_instead(con, walk):
+    """Geht man besser gleich den ganzen Weg zu Fuss (walk: Sekunden)? Ja, wenn die
+    Verbindung hoechstens WALK_GAIN schneller ist und dabei kaum Fussweg spart."""
+    return con_duration(con) > walk - WALK_GAIN and walk - walked(con) < max(WALK_SAVE, WALK_SAVE_SHARE * walk)
+
+
+def sensible(cons, walk=None):
+    """Nur die sinnvollen Verbindungen, nach Abfahrt sortiert: ohne doppelte, ohne
+    ausgefallene und nicht erreichbare (solange es andere gibt), ohne die, zu denen es
+    eine klar bessere gibt (outdone), und ohne die, fuer die man genauso gut zu Fuss geht
+    (walk: Sekunden fuer den ganzen Weg oder None). -> (Verbindungen, Hinweis oder None)"""
+    unique = list({con_key(c): c for c in cons}.values())
+    pool = [c for c in unique if usable(c)] or unique
+    keep = [c for c in pool if not any(outdone(c, o) for o in pool)]
+    if walk and keep and all(walk_instead(c, walk) for c in keep):
+        quick = "quicker" if walk <= min(con_duration(c) for c in keep) else "about as quick"
+        return [], "Walking is %s (%s) - no need for transit." % (quick, duration_text(walk))
+    if walk:
+        keep = [c for c in keep if not walk_instead(c, walk)]
+    return sorted(keep, key=lambda c: (eff_time(c, "dep"), eff_time(c, "arr"))), None
+
+
+def sensible_mixed(cons, transit=None, bike=None):
+    """Rad + Oeffis nur, wo es sich lohnt: mindestens MIXED_BIKE_MIN mit dem Rad (sonst
+    geht man zur Haltestelle) und klar schneller (MIXED_GAIN bzw. MIXED_GAIN_SHARE) als
+    die ganze Strecke mit dem Rad und als die schnellste sinnvolle Verbindung nur mit
+    Oeffis. bike, transit: deren Dauer in Sekunden oder None. -> (Verbindungen, Hinweis)"""
+    keep, _note = sensible([c for c in cons if cycled(c) >= MIXED_BIKE_MIN])
+    if not keep:
+        return [], "The bike would only take you to a stop around the corner - walk there instead."
+    best = min(con_duration(c) for c in keep)
+    for base, what in ((bike, "Cycling all the way"), (transit, "Transit alone")):
+        if base is None:
+            continue
+        keep = [c for c in keep if con_duration(c) <= base - max(MIXED_GAIN, MIXED_GAIN_SHARE * base)]
+        if not keep:
+            return [], "%s is %s (%s)." % (what, "quicker" if base <= best else "about as quick",
+                                           duration_text(base))
+    return keep, None
 
 
 def journey_details(source, jid):
@@ -2168,12 +2286,14 @@ def condense_steps(steps, mode):
         maneuver = step.get("maneuver") or {}
         if maneuver.get("type") == "arrive":
             continue
-        name = (step.get("name") or "").strip() or (step.get("ref") or "").strip()
+        ref = (step.get("ref") or "").split(";")[0].strip()
+        name = (step.get("name") or "").strip() or ref
         meters = step.get("distance") or 0
         if out and (not name and meters < 150 or (name or unnamed) == out[-1]["name"]):
             out[-1]["distance"] += meters
             continue
-        out.append({"name": name or unnamed, "turn": turn_text(maneuver), "distance": meters})
+        # road: kurz fuer "via" - die Strassennummer (A 23), wo es eine gibt
+        out.append({"name": name or unnamed, "road": ref or name, "turn": turn_text(maneuver), "distance": meters})
     while len(out) > 1 and out[0]["distance"] < 40:     # ein paar Meter bis zur ersten Strasse
         out[1].update(distance=out[1]["distance"] + out[0]["distance"], turn="Start")
         out.pop(0)
@@ -2181,21 +2301,27 @@ def condense_steps(steps, mode):
 
 
 def osrm_route(mode, origin, destination):
-    """Rad, zu Fuss oder Auto ueber OSRM (ohne Verkehr)."""
+    """Rad, zu Fuss oder Auto ueber OSRM (ohne Verkehr); beim Auto mit den Alternativen,
+    die OSRM findet (unter "alternatives")."""
     url = "%s/routed-%s/route/v1/driving/%.6f,%.6f;%.6f,%.6f" % (
         OSRM_URL, OSRM_PROFILES[mode], origin["longitude"], origin["latitude"],
         destination["longitude"], destination["latitude"])
-    data = request_json(url, params={"overview": "full", "geometries": "polyline6", "steps": "true"})
+    params = {"overview": "full", "geometries": "polyline6", "steps": "true"}
+    if mode == "car":
+        params["alternatives"] = str(ALT_MAX)
+    data = request_json(url, params=params)
     if not isinstance(data, dict) or data.get("code") != "Ok" or not data.get("routes"):
         if isinstance(data, dict) and data.get("code") in ("NoRoute", "NoSegment"):
             raise NoResult("No route found.")
         raise ServiceError("OSRM: %s" % (data.get("code") if isinstance(data, dict) else "?"))
-    route = data["routes"][0]
-    leg = (route.get("legs") or [{}])[0]
-    return {"mode": mode, "duration": float(route["duration"]), "distance": float(route["distance"]),
-            "summary": leg.get("summary") or "", "steps": condense_steps(leg.get("steps") or [], mode),
-            "coords": decode_polyline(route.get("geometry") or "", 6), "traffic": [], "delay": 0,
-            "source": "osrm", "live": False}
+    routes = []
+    for route in data["routes"]:
+        leg = (route.get("legs") or [{}])[0]
+        routes.append({"mode": mode, "duration": float(route["duration"]), "distance": float(route["distance"]),
+                       "summary": leg.get("summary") or "", "steps": condense_steps(leg.get("steps") or [], mode),
+                       "coords": decode_polyline(route.get("geometry") or "", 6), "traffic": [], "delay": 0,
+                       "source": "osrm", "live": False})
+    return dict(routes[0], alternatives=routes[1:])
 
 
 def tomtom_route(mode, origin, destination, key, when=None):
@@ -2206,7 +2332,8 @@ def tomtom_route(mode, origin, destination, key, when=None):
     params = [("key", key), ("travelMode", TOMTOM_MODES[mode]), ("routeType", "fastest"),
               ("instructionsType", "text"), ("language", "en-GB")]
     if mode == "car":                           # Stau zaehlt nur fuers Auto; Sperren beachtet TomTom immer
-        params += [("traffic", "true"), ("sectionType", "traffic"), ("computeTravelTimeFor", "all")]
+        params += [("traffic", "true"), ("sectionType", "traffic"), ("computeTravelTimeFor", "all"),
+                   ("maxAlternatives", str(ALT_MAX)), ("alternativeType", "anyRoute")]
     if when:
         stamp = dt.datetime.fromtimestamp(when[0], VIENNA).strftime("%Y-%m-%dT%H:%M:%S")
         params.append(("arriveAt" if when[1] else "departAt", stamp))
@@ -2223,7 +2350,12 @@ def tomtom_route(mode, origin, destination, key, when=None):
     routes = data.get("routes") if isinstance(data, dict) else None
     if not routes:
         raise NoResult("No route found.")
-    route = routes[0]
+    found = [tomtom_parse(route, mode) for route in routes if isinstance(route, dict)]
+    return dict(found[0], alternatives=found[1:])
+
+
+def tomtom_parse(route, mode):
+    """Eine Route von TomTom in unserer Form: Strecke, Staus, Strassen der Reihe nach."""
     summary = route.get("summary") or {}
     coords = [(p["longitude"], p["latitude"]) for leg in route.get("legs") or [] for p in leg.get("points") or []
               if isinstance(p, dict) and "latitude" in p]
@@ -2242,12 +2374,13 @@ def tomtom_route(mode, origin, destination, key, when=None):
             continue
         nxt = instructions[i + 1] if i + 1 < len(instructions) else None
         meters = (nxt.get("routeOffsetInMeters", 0) - ins.get("routeOffsetInMeters", 0)) if nxt else 0
-        name = ins.get("street") or ", ".join(ins.get("roadNumbers") or []) or {"bike": "Cycle path", "walk": "Footpath",
-                                                                                  "car": "Road"}[mode]
+        numbers = [n for n in ins.get("roadNumbers") or [] if n]
+        name = ins.get("street") or ", ".join(numbers) or {"bike": "Cycle path", "walk": "Footpath", "car": "Road"}[mode]
         if steps and steps[-1]["name"] == name:
             steps[-1]["distance"] += meters
             continue
-        steps.append({"name": name, "turn": ins.get("message") or "Continue", "distance": meters})
+        steps.append({"name": name, "road": numbers[0] if numbers else name, "turn": ins.get("message") or "Continue",
+                      "distance": meters})
     departure = iso_time(summary.get("departureTime"))
     return {"mode": mode, "duration": float(summary.get("travelTimeInSeconds") or 0),
             "distance": float(summary.get("lengthInMeters") or 0), "summary": "", "steps": steps[:60],
@@ -2272,9 +2405,83 @@ def direct_route(mode, origin, destination, key=None, when=None):
             warning = "TomTom did not answer - shown without traffic."
     if route is None:
         route = osrm_route(mode, origin, destination)
-        route["warning"] = warning
-    route["tz"] = origin.get("tz")             # Uhrzeiten in der Zeit des Starts
-    return route
+    routes = [route] + (route.pop("alternatives", None) or [])
+    routes = sensible_routes(routes) if mode == "car" else routes[:1]
+    label_routes(routes)
+    for each in routes:
+        each["warning"] = warning if each["source"] == "osrm" else None
+        each["tz"] = origin.get("tz")          # Uhrzeiten in der Zeit des Starts
+    return dict(routes[0], alternatives=routes[1:])
+
+
+def shared(route, other, step=0.0002):
+    """Welcher Teil von route (0 bis 1, nach Laenge) ueber dieselben Strassen fuehrt wie
+    other: Rasterzellen von rund 20 m entlang other, je Stueck von route die Mitte."""
+    cells = set()
+    coords = other.get("coords") or []
+    for (x0, y0), (x1, y1) in zip(coords, coords[1:]):
+        n = max(1, int(max(abs(x1 - x0), abs(y1 - y0)) / step))
+        for i in range(n + 1):
+            cells.add((round((x0 + (x1 - x0) * i / n) / step), round((y0 + (y1 - y0) * i / n) / step)))
+    total = same = 0.0
+    coords = route.get("coords") or []
+    for (x0, y0), (x1, y1) in zip(coords, coords[1:]):
+        meters = distance_m(y0, x0, y1, x1)
+        cx, cy = round((x0 + x1) / 2 / step), round((y0 + y1) / 2 / step)
+        total += meters
+        if any((cx + dx, cy + dy) in cells for dx in (-1, 0, 1) for dy in (-1, 0, 1)):
+            same += meters
+    return same / total if total else 1.0
+
+
+def sensible_routes(routes):
+    """Die schnellste Autoroute und Alternativen zur Wahl: hoechstens ALT_SLOWER (bzw.
+    ALT_SLOWER_SHARE) langsamer und zu weniger als ALT_SHARED auf denselben Strassen
+    wie eine schnellere - zusammen hoechstens ALT_MAX, die schnellste zuerst."""
+    routes = sorted((r for r in routes if r.get("coords")), key=lambda r: r["duration"]) or routes[:1]
+    limit = routes[0]["duration"] + max(ALT_SLOWER, ALT_SLOWER_SHARE * routes[0]["duration"])
+    keep = []
+    for route in routes:
+        if keep and route["duration"] > limit:
+            break
+        if any(shared(route, other) >= ALT_SHARED for other in keep):
+            continue
+        keep.append(route)
+        if len(keep) == ALT_MAX:
+            break
+    return keep
+
+
+GENERIC_ROADS = ("Road", "Cycle path", "Footpath")
+
+
+def road_lengths(route):
+    lengths = {}
+    for step in route.get("steps") or []:
+        road = step.get("road") or step.get("name")
+        if road and road not in GENERIC_ROADS:
+            lengths[road] = lengths.get(road, 0) + (step.get("distance") or 0)
+    return lengths
+
+
+def label_routes(routes):
+    """"via" je Route: ihre laengste Strasse (die Nummer, wo es eine gibt) und dazu die
+    laengste, die nur sie nimmt - so unterscheiden sich Alternativen auf einen Blick
+    ("A1, Hauptstraße" und "A1, Bahnhofstraße"). Eine einzelne Route: die zwei laengsten."""
+    roads = [sorted(road_lengths(r).items(), key=lambda kv: -kv[1]) for r in routes]
+    for i, route in enumerate(routes):
+        mine = roads[i]
+        if not mine:
+            route["via"] = route.get("summary") or ""
+            continue
+        others = {name for j, theirs in enumerate(roads) if j != i for name, meters in theirs if meters >= 300}
+        parts = [mine[0][0]]
+        own = next((name for name, meters in mine[1:] if name not in others and meters >= 200), None)
+        if own is None and len(mine) > 1 and (len(routes) == 1 or mine[0][0] in others):
+            own = mine[1][0]
+        if own:
+            parts.append(own)
+        route["via"] = ", ".join(parts)
 
 
 def check_tomtom_key(key):
@@ -2482,7 +2689,8 @@ SYMBOLS = {
                          '<path d="M13.5 10.75 H3.5 M6 8.25 L3.5 10.75 L6 13.25"/>', ""),
 }
 KIND_NAMES = {"train": "train", "subway": "U-Bahn", "tram": "tram", "bus": "bus", "ferry": "ferry"}
-MODES = (("transit", "tram", "Transit"), ("bike", "bike", "Bike"), ("walk", "walk", "Walk"), ("car", "car", "Car"))
+MODES = (("transit", ("tram",), "Transit"), ("mixed", ("bike", "tram"), "Bike + transit (park the bike at a stop)"),
+         ("bike", ("bike",), "Bike"), ("walk", ("walk",), "Walk"), ("car", ("car",), "Car"))
 
 
 # ------------------------------------------------------------------ Auswertung und Texte
@@ -3183,7 +3391,7 @@ UI_CSS = """
 .tr-list row.tr-head, .tr-list row.tr-head:hover { background-color: transparent; padding: 10px 10px 2px; }
 .tr-mode {
     border-radius: 12px;
-    padding: 5px 4px;
+    padding: 5px 2px 4px;
     min-height: 0;
     background-image: none;
     box-shadow: none;
@@ -3632,6 +3840,25 @@ def walk_content(leg):
     return box
 
 
+# Linie der Zeitleiste je Etappe: Fahrt tuerkis, Fussweg gepunktet, Rad grau
+RAIL_STYLES = {"ride": "ride", "walk": "walk", "bike": "solo"}
+
+
+def bike_content(leg, park=False):
+    """Mit dem Rad: Dauer und Strecke; vor einer Fahrt der Hinweis, das Rad dort zu parken."""
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+    head = Gtk.Box(spacing=6)
+    head.pack_start(icon("bike", 14, "dim-label"), False, False, 0)
+    text = "Cycle %s" % duration_text(leg.get("duration") or 60)
+    if leg.get("distance"):
+        text += " · " + distance_text(leg["distance"])
+    head.pack_start(label(text, "dim-label"), False, False, 0)
+    box.pack_start(head, False, False, 0)
+    if park:
+        box.pack_start(label("then park your bike at the stop", "tr-sub", "dim-label"), False, False, 0)
+    return box
+
+
 # ------------------------------------------------------------------ Ortssuche im Fenster
 
 class PlaceEntry:
@@ -3813,6 +4040,7 @@ FLOW_MAX_AGE = 5 * 60           # Verkehrslage-Kacheln veralten schnell
 TILE_RETRY = 60                 # fehlgeschlagene Kachel so lange nicht neu laden
 MAP_BG = (0.93, 0.92, 0.89)     # bis die Kachel da ist
 ROUTE_EDGE = (0.03, 0.17, 0.20)
+ALT_RGB = (0.58, 0.62, 0.66)    # die anderen Autorouten
 WALK_STEP = 13                  # Fussweg-Punkte: Abstand von Mitte zu Mitte (8 px gross, 5 px Luecke)
 # Verkehr auf der Strecke nach TomTom (magnitudeOfDelay 1-4), Sperre dunkelrot
 TRAFFIC_RGB = {0: (0.96, 0.62, 0.04), 1: (0.96, 0.62, 0.04), 2: (0.93, 0.40, 0.07), 3: (0.84, 0.13, 0.13),
@@ -4178,8 +4406,9 @@ class MapView:
     # -- Inhalt
 
     def set_content(self, legs=None, markers=None, fit=True):
-        """legs: [{"style": ride|walk|car|bike, "coords": [(lon, lat)], "traffic": [...]}],
-        markers: [{"kind": start|end|stop|minor|home|sign, "coord": (lon, lat)}]"""
+        """legs: [{"style": ride|walk|cycle|car|bike|alt, "coords": [(lon, lat)], "traffic": [...]}]
+        (cycle: Rad vor einer Fahrt, alt: andere Autoroute), markers: [{"kind":
+        start|end|stop|minor|home|sign, "coord": (lon, lat)}]"""
         self.legs, self.markers = legs or [], markers or []
         if fit:
             self.want_fit = True
@@ -4336,16 +4565,33 @@ class MapView:
         accent = theme_color(self.area.get_style_context(), "accent_color", (0.39, 0.82, 0.87))
         cr.set_line_join(cairo.LINE_JOIN_ROUND)
         cr.set_line_cap(cairo.LINE_CAP_ROUND)
-        for leg in self.legs:                   # erst alle Raender, dann die Linien - Kreuzungen sauber
-            if len(leg["coords"]) >= 2 and leg["style"] != "walk":
+        for leg in self.legs:                   # andere Autorouten: grau, unter allem anderen
+            if len(leg["coords"]) >= 2 and leg["style"] == "alt":
+                self.polyline(cr, leg["coords"])
+                cr.set_source_rgba(*ROUTE_EDGE, 0.35)
+                cr.set_line_width(8)
+                cr.stroke_preserve()
+                cr.set_source_rgba(*ALT_RGB, 0.95)
+                cr.set_line_width(5)
+                cr.stroke()
+        legs = [leg for leg in self.legs if leg["style"] != "alt" and len(leg["coords"]) >= 2]
+        for leg in legs:                        # erst alle Raender, dann die Linien - Kreuzungen sauber
+            if leg["style"] != "walk":
                 self.polyline(cr, leg["coords"])
                 cr.set_source_rgba(*ROUTE_EDGE, 0.85)
                 cr.set_line_width(9)
                 cr.stroke()
-        for leg in self.legs:
-            if len(leg["coords"]) < 2:
-                continue
+        for leg in legs:
             self.polyline(cr, leg["coords"])
+            if leg["style"] == "cycle":         # Rad vor der Fahrt: tuerkis-weiss gestrichelt
+                cr.set_source_rgba(1, 1, 1, 0.95)
+                cr.set_line_width(5.5)
+                cr.stroke_preserve()
+                cr.set_dash([9, 6])
+                cr.set_source_rgba(accent.red, accent.green, accent.blue, 1)
+                cr.stroke()
+                cr.set_dash([])
+                continue
             if leg["style"] == "walk":          # Fussweg: einzelne Punkte, weiss umrandet, mit Luecken
                 cr.set_dash([0.01, WALK_STEP - 0.01])
                 cr.set_source_rgba(1, 1, 1, 0.95)
@@ -4623,15 +4869,19 @@ class TransitWindow:
         timing.pack_start(self.time_box, False, False, 0)
         left.pack_start(timing, False, False, 0)
 
-        modes = Gtk.Box(spacing=6, homogeneous=True)
+        # Fuenf Knoepfe passen nur mit der Dauer unter dem Symbol in die Spalte
+        modes = Gtk.Box(spacing=4, homogeneous=True)
         self.mode_buttons, self.mode_labels, group = {}, {}, None
-        for mode, key, name in MODES:
+        for mode, keys, name in MODES:
             button = styled(Gtk.RadioButton.new_from_widget(group), "tr-mode")
             button.set_mode(False)              # als Knopf, ohne Auswahlpunkt
             group = group or button
-            box = Gtk.Box(spacing=5, halign=Gtk.Align.CENTER)
-            box.pack_start(icon(key, 16), False, False, 0)
-            self.mode_labels[mode] = label("–")
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, halign=Gtk.Align.CENTER)
+            glyphs = Gtk.Box(spacing=1, halign=Gtk.Align.CENTER)
+            for key in keys:
+                glyphs.pack_start(icon(key, 16), False, False, 0)
+            box.pack_start(glyphs, False, False, 0)
+            self.mode_labels[mode] = label("–", "tr-sub", xalign=0.5)
             box.pack_start(self.mode_labels[mode], False, False, 0)
             button.add(box)
             button.set_tooltip_text(name)
@@ -4850,8 +5100,9 @@ class TransitWindow:
     # -- Suche
 
     def search(self):
-        """Alle Verkehrsmittel auf einmal suchen: Oeffis bei der OeBB, Rad, zu Fuss und
-        Auto bei OSRM - jedes Ergebnis kommt fuer sich an."""
+        """Alle Verkehrsmittel auf einmal suchen: Oeffis beim zustaendigen Planer, Rad +
+        Oeffis bei Transitous, Rad, zu Fuss und Auto bei TomTom bzw. OSRM - jedes Ergebnis
+        kommt fuer sich an."""
         origin, destination = self.from_entry.place, self.to_entry.place
         moment = self.when_time()
         self.serial += 1
@@ -4867,6 +5118,8 @@ class TransitWindow:
         self.show_list()
         threading.Thread(target=self.fetch_transit, args=(self.serial, origin, destination, moment, None, None),
                          daemon=True).start()
+        threading.Thread(target=self.fetch_mixed, args=(self.serial, origin, destination, moment),
+                         daemon=True).start()
         for mode in ("bike", "walk", "car"):
             threading.Thread(target=self.fetch_direct, args=(self.serial, mode, origin, destination, moment),
                              daemon=True).start()
@@ -4880,6 +5133,16 @@ class TransitWindow:
             log("connection search failed: %s: %s" % (type(exc).__name__, exc))
             result = ServiceError("The search did not work - try again later.")
         GLib.idle_add(self.got_transit, serial, result, direction)
+
+    def fetch_mixed(self, serial, origin, destination, moment):
+        try:
+            result = mixed_search(origin, destination, moment)
+        except (NoResult, Offline) as exc:
+            result = exc
+        except Exception as exc:  # noqa: BLE001
+            log("bike + transit search failed: %s: %s" % (type(exc).__name__, exc))
+            result = ServiceError("The search did not work - try again later.")
+        GLib.idle_add(self.got_direct, serial, "mixed", result)
 
     def fetch_direct(self, serial, mode, origin, destination, moment=None):
         try:
@@ -4916,27 +5179,68 @@ class TransitWindow:
         self.after_result(mode)
         return GLib.SOURCE_REMOVE
 
+    # Was zu Oeffis und zu Rad + Oeffis gezeigt wird, haengt auch von den anderen ab
+    DEPENDS = {"walk": ("transit", "mixed"), "transit": ("mixed",), "bike": ("mixed",)}
+
     def after_result(self, mode):
+        for each in self.mode_labels:
+            self.mode_labels[each].set_markup(self.mode_summary(each))
+        self.update_status()
+        if mode == self.mode or self.mode in self.DEPENDS.get(mode, ()):
+            self.show_list(keep=True)
+
+    def update_status(self):
+        """Unten rechts: wer die Verbindungen rechnet, beim Suchen "Searching…"."""
+        mode = self.mode if self.mode in ("transit", "mixed") else None
+        result = self.results.get(mode) if mode else None
+        if not self.searched or mode is None:
+            text = "Searching…" if self.searched and self.results.get(self.mode) is None else ""
+        elif result is None:
+            text = "Searching…"
+        elif isinstance(result, Exception):
+            text = str(result) if mode == "transit" else ""
+        else:
+            text = "Route by %s · %s" % (SOURCE_NAMES.get(result.get("planner"), "ÖBB"), when(time.time(), time.time()))
+        self.status.set_text(text)
+
+    def found(self, mode):
+        """Das Ergebnis eines Verkehrsmittels, wenn es eines gibt (sonst None)."""
         result = self.results.get(mode)
-        self.mode_labels[mode].set_markup(self.mode_summary(mode))
-        if mode == "transit" and isinstance(result, Exception):
-            self.status.set_text(str(result))
-        elif mode == "transit":
-            self.status.set_text("Route by %s · %s" % (SOURCE_NAMES.get(result.get("planner"), "ÖBB"),
-                                                       when(time.time(), time.time())))
-        if mode == self.mode:
-            self.show_list()
+        return result if isinstance(result, dict) else None
+
+    def transit_cons(self):
+        """Die sinnvollen Verbindungen mit Oeffis und ein Hinweis, wenn keine bleibt - mit
+        dem Vergleich zu Fuss, sobald dessen Route da ist."""
+        result, walk = self.found("transit"), self.found("walk")
+        if result is None:
+            return [], None
+        return sensible(result["cons"], walk["duration"] if walk else None)
+
+    def mixed_cons(self):
+        """Rad + Oeffis, die sich lohnen, und ein Hinweis, wenn keine. None, solange
+        Oeffis oder Rad allein noch suchen - sonst tauchten Verbindungen auf und
+        verschwaenden wieder."""
+        result = self.found("mixed")
+        if result is None:
+            return [], None
+        if self.results.get("transit") is None or self.results.get("bike") is None:
+            return None, None
+        transit = min((con_duration(c) for c in self.transit_cons()[0]), default=None)
+        bike = self.found("bike")
+        return sensible_mixed(result["cons"], transit, bike["duration"] if bike else result.get("bike"))
 
     def mode_summary(self, mode):
-        """Dauer fuer den Umschalter: die schnellste Verbindung bzw. die Route."""
+        """Dauer fuer den Umschalter: die schnellste sinnvolle Verbindung bzw. Route."""
         result = self.results.get(mode)
         if result is None:
             return "…" if self.searched else "–"
         if isinstance(result, Exception):
             return "–"
-        if mode == "transit":
-            cons = pareto(result["cons"])
-            fastest = min((eff_time(c, "arr") - eff_time(c, "dep") for c in cons if not c["cancelled"]), default=None)
+        if mode in ("transit", "mixed"):
+            cons, _note = self.transit_cons() if mode == "transit" else self.mixed_cons()
+            if cons is None:
+                return "…"
+            fastest = min((con_duration(c) for c in cons), default=None)
             return duration_text(fastest) if fastest is not None else "–"
         text = GLib.markup_escape_text(duration_text(result["duration"]))
         delay = int(round((result.get("delay") or 0) / 60.0))
@@ -4947,6 +5251,7 @@ class TransitWindow:
     def on_mode(self, button, mode):
         if button.get_active():
             self.mode = mode
+            self.update_status()
             self.show_list()
 
     def on_page_turn(self, _button, direction):
@@ -4966,42 +5271,86 @@ class TransitWindow:
         for child in listbox.get_children():
             child.destroy()
 
-    def show_list(self):
-        """Die Routenliste fuer das gewaehlte Verkehrsmittel; ohne Suche die letzten Ziele."""
+    def list_content(self):
+        """Was die Routenliste zeigt: ("recent"|"wait"|"note", Text) oder ("items",
+        [Eintrag], Hinweis) - Eintrag ("con", Verbindung) bzw. ("direct", Route, andere)."""
+        if not self.searched:
+            return ("recent", None)
+        result = self.results.get(self.mode)
+        if result is None:
+            return ("wait", "Searching…")
+        if isinstance(result, Exception):
+            return ("note", str(result))
+        if self.mode in ("transit", "mixed"):
+            cons, note = self.transit_cons() if self.mode == "transit" else self.mixed_cons()
+            if cons is None:
+                return ("wait", "Searching…")
+            return ("items", [("con", c) for c in cons], note)
+        routes = [result] + (result.get("alternatives") or [])
+        return ("items", [("direct", r, [o for o in routes if o is not r]) for r in routes], None)
+
+    @staticmethod
+    def item_key(item):
+        if item is None:
+            return None
+        if item[0] == "con":
+            return ("con", con_key(item[1]))
+        if item[0] == "direct":
+            return ("direct", item[1]["mode"], round(item[1]["duration"]), round(item[1]["distance"]))
+        return (item[0], (item[1] or {}).get("name"))
+
+    def show_list(self, keep=False):
+        """Die Routenliste fuer das gewaehlte Verkehrsmittel; ohne Suche die letzten Ziele.
+        keep: nur neu aufbauen, wenn sich etwas geaendert hat, und die Auswahl behalten -
+        fuer Ergebnisse, die nachtraeglich ankommen (zu Fuss filtert die Oeffis mit)."""
+        content = self.list_content()
+        shape = (self.mode, content[0], content[1] if content[0] != "items" else
+                 (tuple(self.item_key(i) for i in content[1]), content[2]))
+        if keep and shape == getattr(self, "list_shape", None):
+            return
+        selected = self.item_at(self.route_list.get_selected_row()) if keep else None
+        self.list_shape = shape
         self.clear_list(self.route_list)
         self.list_items, self.leave_labels = [], []
         transit = self.mode == "transit"
         result = self.results.get(self.mode)
-        self.paging_box.set_visible(transit and isinstance(result, dict))
+        # Blaettern nur, wo es Verbindungen gibt - geht man besser zu Fuss, auch spaeter
+        self.paging_box.set_visible(transit and isinstance(result, dict) and content[0] == "items"
+                                    and bool(content[1]))
         if isinstance(result, dict) and transit:
             self.earlier.set_sensitive(bool(result.get("earlier")))
             self.later.set_sensitive(bool(result.get("later")))
-        if not self.searched:
+        if content[0] == "recent":
             for mode in self.mode_labels:
                 self.mode_labels[mode].set_text("–")
             self.status.set_text("")
             self.show_recent()
             return
-        if result is None:
-            self.add_note(self.route_list, "Searching…")
-            self.route_detail.message("Searching…")
+        if content[0] in ("wait", "note"):
+            self.add_note(self.route_list, content[1])
+            self.route_detail.message(content[1])
             return
-        if isinstance(result, Exception):
-            self.add_note(self.route_list, str(result))
-            self.route_detail.message(str(result))
+        items, note = content[1], content[2]
+        if not items:
+            self.add_note(self.route_list, note or "Nothing sensible found.")
+            self.route_detail.message(note or "Nothing sensible found.")
             return
-        if transit:
-            now = time.time()
-            cons = pareto(result["cons"])
-            for con in cons:
-                widget, leave = connection_row(con, self.tray.settings.get("prefix") or "")
-                self.add_row(self.route_list, widget, ("con", con))
-                self.leave_labels.append((leave, con))
-            self.update_leave(now)
-            first = next((i for i, c in enumerate(cons) if eff_time(c, "dep") >= now - 60), 0)
-        else:
-            self.add_row(self.route_list, direct_row(result, self.direct_start(result)), ("direct", result))
-            first = 0
+        now = time.time()
+        prefix = self.tray.settings.get("prefix") or ""
+        fastest = min(item[1]["duration"] for item in items) if items[0][0] == "direct" else None
+        for item in items:
+            if item[0] == "con":
+                widget, leave = connection_row(item[1], prefix)
+                self.leave_labels.append((leave, item[1]))
+            else:
+                widget = direct_row(item[1], self.direct_start(item[1]), fastest if len(items) > 1 else None)
+            self.add_row(self.route_list, widget, item)
+        self.update_leave(now)
+        first = 0
+        if items[0][0] == "con":
+            first = next((i for i, item in enumerate(items) if eff_time(item[1], "dep") >= now - 60), 0)
+        wanted = self.item_key(selected)
+        first = next((i for i, item in enumerate(items) if wanted and self.item_key(item) == wanted), first)
         row = self.route_list.get_row_at_index(first)
         if row is not None:
             self.route_list.select_row(row)
@@ -5073,7 +5422,7 @@ class TransitWindow:
         else:
             route = item[1]
             self.route_detail.show_direct(route, from_name, to_name, self.direct_start(route),
-                                          map_url(route["mode"], origin, destination))
+                                          map_url(route["mode"], origin, destination), item[2])
 
     def direct_start(self, route):
         """Losgehen fuer Rad, zu Fuss und Auto: jetzt, zur gewaehlten Zeit oder so, dass
@@ -5309,11 +5658,11 @@ def connection_row(con, prefix):
 
     items = []
     for leg in con["legs"]:
-        if leg["type"] == "walk":
+        if leg["type"] in ("walk", "bike"):             # Fussweg bzw. Rad: Symbol und Minuten
             if (leg.get("duration") or 0) < 60:
                 continue
             part = Gtk.Box(spacing=2)
-            part.pack_start(icon("walk", 14, "dim-label"), False, False, 0)
+            part.pack_start(icon(leg["type"], 14, "dim-label"), False, False, 0)
             part.pack_start(label(str(int(round(leg["duration"] / 60.0))), "dim-label", "tr-sub"), False, False, 0)
         else:
             part = chip(leg["kind"], leg["line"], leg.get("cancelled"))
@@ -5351,20 +5700,29 @@ def connection_row(con, prefix):
     return box, leave
 
 
-def direct_row(route, start):
-    """Rad, zu Fuss oder Auto in der Liste: Dauer, Strecke, Ankunft, ueber welche Strassen."""
+def direct_row(route, start, fastest=None):
+    """Rad, zu Fuss oder Auto in der Liste: Dauer (mit Stau orange), Strecke, Ankunft,
+    ueber welche Strassen. fastest: Dauer der schnellsten Route, wenn Alternativen zur
+    Wahl stehen - dann steht dabei, um wie viel diese langsamer ist."""
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
     top = Gtk.Box(spacing=8)
     key = {"bike": "bike", "walk": "walk", "car": "car"}[route["mode"]]
     top.pack_start(icon(key, 16), False, False, 0)
     top.pack_start(label(duration_text(route["duration"]), "tr-big"), False, False, 0)
+    delay = int(round((route.get("delay") or 0) / 60.0))
+    if route.get("live") and route["mode"] == "car" and delay > 0:
+        top.pack_start(label("+%d" % delay, "tr-late", "tr-sub"), False, False, 0)
     top.pack_end(label(distance_text(route["distance"]), "dim-label"), False, False, 0)
     box.pack_start(top, False, False, 0)
     box.pack_start(label("%s – %s" % (clock(start, route.get("tz")), clock(start + route["duration"], route.get("tz"))),
                          "tr-sub", "dim-label"),
                    False, False, 0)
-    if route.get("summary"):
-        box.pack_start(label("via " + route["summary"], "tr-sub", "dim-label", ellipsize=True), False, False, 0)
+    via = ["via " + (route.get("via") or route.get("summary"))] if route.get("via") or route.get("summary") else []
+    slower = int(round((route["duration"] - fastest) / 60.0)) if fastest is not None else 0
+    if slower > 0:
+        via.append("%d min slower" % slower)
+    if via:
+        box.pack_start(label(" · ".join(via), "tr-sub", "dim-label", ellipsize=True), False, False, 0)
     return box
 
 
@@ -5475,6 +5833,20 @@ class Detail:
         i = 0
         while i < len(legs):
             leg = legs[i]
+            if leg["type"] == "bike":           # mit dem Rad (zur Haltestelle, Rad + Oeffis)
+                if i == 0:
+                    line.node(from_name, leg["dep"], None, None, None, "solo", tz=start_tz)
+                elif last_ride == i - 1:
+                    came = legs[last_ride]
+                    line.node(short_name(leg["from"], prefix), came["arr"], came.get("arr_real"),
+                              platform_text(came, "arr"), "ride", "solo", tz=came.get("arr_tz"))
+                else:
+                    line.node(short_name(leg["from"], prefix), leg["dep"], None, None, "walk", "solo",
+                              tz=leg.get("dep_tz"))
+                after = legs[i + 1] if i + 1 < len(legs) else None
+                line.leg("solo", bike_content(leg, after is not None and after["type"] == "ride"))
+                i += 1
+                continue
             if leg["type"] == "walk":
                 # aufeinanderfolgende Fusswege (Weg und Umstieg im Bahnhof) zusammen
                 j = i
@@ -5489,8 +5861,11 @@ class Detail:
                               platform_text(came, "arr"), "ride", "walk", tz=came.get("arr_tz"))
                     line.leg("walk", change_content(walk, came, after))
                 else:                       # Fussweg am Anfang oder am Ende
-                    if last_ride is None:
+                    if last_ride is None and i == 0:
                         line.node(from_name, walk["dep"], walk.get("dep_real"), None, None, "walk", tz=start_tz)
+                    elif last_ride is None:     # nach dem Rad zu Fuss weiter
+                        line.node(short_name(leg["from"], prefix), walk["dep"], None, None, "solo", "walk",
+                                  tz=leg.get("dep_tz"))
                     else:
                         came = legs[last_ride]
                         line.node(short_name(leg["from"], prefix), came["arr"], came.get("arr_real"),
@@ -5499,7 +5874,7 @@ class Detail:
                 i = j + 1
                 continue
             prev = legs[i - 1] if i else None
-            before = None if prev is None else "ride" if prev["type"] == "ride" else "walk"
+            before = None if prev is None else RAIL_STYLES[prev["type"]]
             name = from_name if i == 0 else short_name(leg["from"], prefix)
             change = arrival = None
             if prev is not None and prev["type"] == "ride":     # Umstieg am selben Steig
@@ -5515,19 +5890,21 @@ class Detail:
             line.node(to_name, last["arr"], last.get("arr_real"), platform_text(last, "arr"), "ride", None, end=True,
                       tz=end_tz)
         else:
-            line.node(to_name, last["arr"], last.get("arr_real"), None, "walk", None, end=True, tz=end_tz)
+            line.node(to_name, last["arr"], last.get("arr_real"), None, RAIL_STYLES[last["type"]], None, end=True,
+                      tz=end_tz)
         self.box.pack_start(line.grid, False, False, 0)
         self.box.show_all()
         self.view.set_content(*connection_map(con))
 
-    def show_direct(self, route, from_name, to_name, start, url):
-        """Rad, zu Fuss oder Auto: Dauer mit Verkehr, Meldungen, die Strassen der Reihe nach."""
+    def show_direct(self, route, from_name, to_name, start, url, others=()):
+        """Rad, zu Fuss oder Auto: Dauer mit Verkehr, Meldungen, die Strassen der Reihe
+        nach. others: die anderen Autorouten - auf der Karte grau dahinter."""
         self.clear()
         mode = route["mode"]
         title = "%s · %s" % (duration_text(route["duration"]), distance_text(route["distance"]))
         sub = "%s – %s" % (clock(start, route.get("tz")), clock(start + route["duration"], route.get("tz")))
-        if route.get("summary"):
-            sub += " · via " + route["summary"]
+        if route.get("via") or route.get("summary"):
+            sub += " · via " + (route.get("via") or route["summary"])
         notes = []
         if route.get("live"):
             delay = int(round((route.get("delay") or 0) / 60.0))
@@ -5573,7 +5950,7 @@ class Detail:
         button.connect("clicked", lambda _b: open_uri(url))
         self.box.pack_start(button, False, False, 0)
         self.box.show_all()
-        self.view.set_content(*direct_map(route))
+        self.view.set_content(*direct_map(route, others))
 
     def show_trip(self, dep, trip, prefix):
         """Der Verlauf einer Abfahrt: ab der eigenen Haltestelle alle Halte bis zum Ziel."""
@@ -5625,7 +6002,7 @@ def connection_map(con):
     legs, markers = [], []
     for leg in con["legs"]:
         coords = leg.get("path") or [c for c in (leg.get("from_coord"), leg.get("to_coord")) if c]
-        legs.append({"style": "ride" if leg["type"] == "ride" else "walk", "coords": coords})
+        legs.append({"style": {"ride": "ride", "bike": "cycle"}.get(leg["type"], "walk"), "coords": coords})
         if leg["type"] == "ride":
             markers += [{"kind": "minor", "coord": s["coord"]} for s in leg.get("stops") or [] if s.get("coord")]
             markers += [{"kind": "stop", "coord": c} for c in (leg.get("from_coord"), leg.get("to_coord")) if c]
@@ -5638,13 +6015,15 @@ def connection_map(con):
     return legs, markers
 
 
-def direct_map(route):
+def direct_map(route, others=()):
+    """Eine Route auf der Karte; die anderen Autorouten grau darunter."""
     style = {"walk": "walk", "bike": "bike", "car": "car"}[route["mode"]]
     coords = route.get("coords") or []
     markers = []
     if coords:
         markers = [{"kind": "start", "coord": coords[0]}, {"kind": "end", "coord": coords[-1]}]
-    return [{"style": style, "coords": coords, "traffic": route.get("traffic") or []}], markers
+    legs = [{"style": "alt", "coords": other.get("coords") or []} for other in others]
+    return legs + [{"style": style, "coords": coords, "traffic": route.get("traffic") or []}], markers
 
 
 def trip_map(trip, start):

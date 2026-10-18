@@ -8,7 +8,10 @@ Ein Statusleisten-Widget für Linux (gebaut für COSMIC auf Pop!_OS, läuft übe
 
 - **Menü:** je gewählter Haltestelle die nächsten Abfahrten mit Uhrzeit, Linie, Richtung und Verspätung. Was du zu Fuß nicht mehr erreichst, fällt weg.
 - **Filter je Haltestelle:** welche Linien und Richtungen Menü und Abfahrten zeigen. Richtungen gelten, wie der Betreiber sie führt (Hin- und Rückrichtung, mit Kurzführungen), bei Zügen je Ziel; neue Linien und Ziele erscheinen, bis man sie abhakt.
-- **Routenplaner:** Öffis, Rad, zu Fuß und Auto auf einmal. Der Verlauf zeigt jede Etappe mit Steig, Umstiege mit Fußweg und Wartezeit (auch innerhalb einer Station, etwa „stairs up“), und die Strecke auf der Karte.
+- **Routenplaner:** Öffis, Rad + Öffis, Rad, zu Fuß und Auto auf einmal. Der Verlauf zeigt jede Etappe mit Steig, Umstiege mit Fußweg und Wartezeit (auch innerhalb einer Station, etwa „stairs up“), und die Strecke auf der Karte.
+- **Nur sinnvolle Verbindungen:** Eine Verbindung fällt weg, wenn eine andere höchstens 3 Minuten früher losgeht, höchstens 3 Minuten später ankommt (5, wenn man dafür 10 Minuten später losgeht) und klar weniger Aufwand ist – Dauer plus 5 Minuten je Umstieg plus die Hälfte von Fußweg und Rad. Weg sind damit etwa „20 Minuten früher los für 3 Minuten früher da“ oder 25 Minuten Fußweg statt der Bim. Ist man zu Fuß fast gleich schnell, steht das statt der Liste.
+- **Rad + Öffis (Bike & Ride):** mit dem eigenen Rad zur Haltestelle, dort parken, weiter mit Öffis. Gezeigt nur, wenn es mindestens 5 Minuten (bzw. 15 %) schneller ist als nur Öffis und als die ganze Strecke mit dem Rad; sonst sagt die Liste, was schneller ist.
+- **Autorouten zur Wahl:** die schnellste und bis zu zwei Alternativen, die höchstens 5 Minuten (bzw. 15 %) langsamer sind und großteils andere Straßen nehmen, jeweils mit „via“ und den anderen grau auf der Karte.
 - **Abfahrten:** der Fahrtverlauf jeder Abfahrt mit allen Halten. Welche Haltestelle zuerst kommt, legen Pfeile neben ihrem Namen fest – unter „Departures“ und in „Home & stops“.
 - **Live-Verkehr** für Autorouten mit einem eigenen, kostenlosen TomTom-Schlüssel (optional).
 - **Europaweit:** Zuhause, Start und Ziel können überall in Europa liegen; Uhrzeiten stehen in der Ortszeit.
@@ -21,7 +24,7 @@ Ein Statusleisten-Widget für Linux (gebaut für COSMIC auf Pop!_OS, läuft übe
 | Linz (Bim, Bus, Pöstlingbergbahn) | Linz AG Fahrplanauskunft (EFA) |
 | Züge, S-Bahn, Postbus, sonst Österreich | ÖBB-Fahrplanauskunft (HAFAS) |
 | private Regionalbusse in Ostösterreich / Oberösterreich | VOR AnachB bzw. OÖVV (Verkehrsauskunft Österreich) |
-| Rest Europas und über die Grenze | [Transitous](https://transitous.org): offene Fahrplandaten der Betreiber, Echtzeit wo vorhanden ([Quellen](https://transitous.org/sources/)) |
+| Rest Europas und über die Grenze, Rad + Öffis überall | [Transitous](https://transitous.org): offene Fahrplandaten der Betreiber, Echtzeit wo vorhanden ([Quellen](https://transitous.org/sources/)) |
 | Rad, zu Fuß, Auto | TomTom (mit Schlüssel, mit Verkehr), sonst die OSRM-Router der FOSSGIS auf OpenStreetMap |
 | Karte | [basemap.at](https://basemap.at) in Österreich (CC BY 4.0), rundherum © [OpenStreetMap](https://www.openstreetmap.org/copyright)-Mitwirkende, an der Grenze weich ineinander übergehend |
 
@@ -61,11 +64,11 @@ python3 ~/.local/bin/transit-tray.py --once     # einmal abfragen, Menü als Tex
 
 - Zuhause, Haltestellen, ihre Filter, letzte Ziele und der TomTom-Schlüssel stehen nur lokal in `~/.config/transit-tray/settings.json` (nur für dich lesbar), Kartenkacheln und der letzte Stand in `~/.cache/transit-tray`. Im Fenster steht der Schlüssel verdeckt; das Auge im Feld zeigt ihn.
 - Abfragen gehen direkt an die Dienste oben; für Routen mit den Koordinaten von Start und Ziel.
-- Jede Anfrage trägt den User-Agent `transit-tray/3.1 (+https://github.com/magnusgoeppel/transit-tray)`. Transitous und die OpenStreetMap-Kacheln verlangen Name, Version und Kontakt. Wer eine geänderte Fassung weitergibt, trägt dort (`APP_URL` im Skript) die eigene Adresse ein.
+- Jede Anfrage trägt den User-Agent `transit-tray/3.2 (+https://github.com/magnusgoeppel/transit-tray)`. Transitous und die OpenStreetMap-Kacheln verlangen Name, Version und Kontakt. Wer eine geänderte Fassung weitergibt, trägt dort (`APP_URL` im Skript) die eigene Adresse ein.
 
 ## Rücksicht auf die Dienste
 
-- **Transitous** wird von Freiwilligen betrieben und ist nur für offene, nicht kommerzielle Projekte gedacht ([Bedingungen](https://transitous.org/api/)). Das Widget fragt Abfahrten dort höchstens alle 4 Minuten ab – dazu einmal, wenn man den Filter einer Haltestelle öffnet oder ändert – und nennt die Quellen im Verlauf („Route by Transitous“).
+- **Transitous** wird von Freiwilligen betrieben und ist nur für offene, nicht kommerzielle Projekte gedacht ([Bedingungen](https://transitous.org/api/)). Das Widget fragt Abfahrten dort höchstens alle 4 Minuten ab – dazu einmal, wenn man den Filter einer Haltestelle öffnet oder ändert –, rechnet Rad + Öffis mit einer Anfrage je Routensuche (nicht unter 1,5 km) und nennt die Quellen im Verlauf („Route by Transitous“).
 - **OpenStreetMap-Kacheln** nach der [Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/): nur außerhalb Österreichs und an der Grenze, 30 Tage zwischengespeichert.
 - Abfahrten insgesamt alle 2 Minuten, über getaktete Verbindungen alle 5, nachts ohne Fahrten alle 15.
 
