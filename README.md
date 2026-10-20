@@ -8,8 +8,8 @@ Ein Statusleisten-Widget für Linux (gebaut für COSMIC auf Pop!_OS, läuft übe
 
 - **Menü:** je gewählter Haltestelle die nächsten Abfahrten mit Uhrzeit, Linie, Richtung und Verspätung. Was du zu Fuß nicht mehr erreichst, fällt weg.
 - **Filter je Haltestelle:** welche Linien und Richtungen Menü und Abfahrten zeigen. Richtungen gelten, wie der Betreiber sie führt (Hin- und Rückrichtung, mit Kurzführungen), bei Zügen je Ziel; neue Linien und Ziele erscheinen, bis man sie abhakt.
-- **Routenplaner:** Öffis, Rad + Öffis, Rad, zu Fuß und Auto auf einmal. Der Verlauf zeigt jede Etappe mit Steig, Umstiege mit Fußweg und Wartezeit (auch innerhalb einer Station, etwa „stairs up“), und die Strecke auf der Karte.
-- **Nur sinnvolle Verbindungen:** Eine Verbindung fällt weg, wenn eine andere höchstens 3 Minuten früher losgeht, höchstens 3 Minuten später ankommt (5, wenn man dafür 10 Minuten später losgeht) und klar weniger Aufwand ist – Dauer plus 5 Minuten je Umstieg plus die Hälfte von Fußweg und Rad. Weg sind damit etwa „20 Minuten früher los für 3 Minuten früher da“ oder 25 Minuten Fußweg statt der Bim. Ist man zu Fuß fast gleich schnell, steht das statt der Liste.
+- **Routenplaner:** Öffis, Rad + Öffis, Rad, zu Fuß und Auto auf einmal. Der Verlauf zeigt jede Etappe mit Steig, Umstiege mit Fußweg und Wartezeit (auch innerhalb einer Station, etwa „stairs up“), und die Strecke auf der Karte. Wo der Planer keine Echtzeit hat (etwa die U-Bahn), holt das Widget sie beim Betreiber nach und rechnet eine Verspätung bis zur Ankunft weiter.
+- **Nur sinnvolle Verbindungen:** Eine Verbindung fällt weg, wenn eine andere nicht früher losgeht, höchstens 3 Minuten später ankommt (5, wenn man dafür 10 Minuten später losgeht) und klar weniger Aufwand ist – Dauer plus 5 Minuten je Umstieg plus die Hälfte von Fußweg und Rad. Weg sind damit etwa „20 Minuten früher los für 3 Minuten früher da“ oder 25 Minuten Fußweg statt der Bim. Eine frühere Verbindung verdrängt nie eine spätere: Wer sie knapp verpasst, sieht die nächste gute. Ist man zu Fuß fast gleich schnell, steht das statt der Liste.
 - **Rad + Öffis (Bike & Ride):** mit dem eigenen Rad zur Haltestelle, dort parken, weiter mit Öffis. Gezeigt nur, wenn es mindestens 5 Minuten (bzw. 15 %) schneller ist als nur Öffis und als die ganze Strecke mit dem Rad; sonst sagt die Liste, was schneller ist.
 - **Autorouten zur Wahl:** die schnellste und bis zu zwei Alternativen, die höchstens 5 Minuten (bzw. 15 %) langsamer sind und großteils andere Straßen nehmen, jeweils mit „via“ und den anderen grau auf der Karte.
 - **Abfahrten:** der Fahrtverlauf jeder Abfahrt mit allen Halten. Welche Haltestelle zuerst kommt, legen Pfeile neben ihrem Namen fest – unter „Departures“ und in „Home & stops“.
@@ -20,7 +20,7 @@ Ein Statusleisten-Widget für Linux (gebaut für COSMIC auf Pop!_OS, läuft übe
 
 | Bereich | Quelle |
 |---|---|
-| Wien (U-Bahn, Bim, Bus) | Wiener Linien: Open Data (Echtzeit) und Routenplaner (EFA) |
+| Wien (U-Bahn, Bim, Bus) | Wiener Linien: Open Data (Abfahrten, Echtzeit). Verbindungen rechnet die Verkehrsauskunft Österreich über VOR AnachB – mit ihr rechnet auch die WienMobil-App der Wiener Linien. Der Open-Data-Routenplaner der Wiener Linien fährt nach altem Fahrplan (im Oktober 2026 ohne die bis zum Stadion verlängerte 18). |
 | Linz (Bim, Bus, Pöstlingbergbahn) | Linz AG Fahrplanauskunft (EFA) |
 | Züge, S-Bahn, Postbus, sonst Österreich | ÖBB-Fahrplanauskunft (HAFAS) |
 | private Regionalbusse in Ostösterreich / Oberösterreich | VOR AnachB bzw. OÖVV (Verkehrsauskunft Österreich) |

@@ -13,12 +13,14 @@ Haltestellen (Reihenfolge; welche Linien und Richtungen sie zeigen) und den
 TomTom-Schluessel.
 
 In Oesterreich kommt jedes Verkehrsmittel von der Schnittstelle seines Betreibers:
-Wiener Linien (Open Data und Routenplaner), Linz AG (EFA), ÖBB (Zuege, Postbus), VOR
-und OÖVV (Verkehrsauskunft Oesterreich, private Regionalbusse). Im Rest Europas (und
-ueber die Grenze) rechnet Transitous mit den offenen Fahrplaenen der Betreiber. Auto,
-Rad und zu Fuss rechnet TomTom mit aktuellem Verkehr (kostenloser Schluessel), ohne
-Schluessel die OpenStreetMap-Router der FOSSGIS. Die Karte ist in Oesterreich
-basemap.at, rundherum OpenStreetMap, an der Grenze weich ineinander uebergehend.
+Wiener Linien (Open Data), Linz AG (EFA), ÖBB (Zuege, Postbus), VOR und OÖVV
+(Verkehrsauskunft Oesterreich, private Regionalbusse). Verbindungen in Wien rechnet wie
+in der WienMobil-App der Wiener Linien die Verkehrsauskunft Oesterreich. Im Rest
+Europas (und ueber die Grenze) rechnet Transitous mit den offenen Fahrplaenen der
+Betreiber. Auto, Rad und zu Fuss rechnet TomTom mit aktuellem Verkehr (kostenloser
+Schluessel), ohne Schluessel die OpenStreetMap-Router der FOSSGIS. Die Karte ist in
+Oesterreich basemap.at, rundherum OpenStreetMap, an der Grenze weich ineinander
+uebergehend.
 
 Quellcode: https://github.com/magnusgoeppel/transit-tray (MIT-Lizenz).
 
@@ -69,8 +71,9 @@ HAFAS_SOURCES = {
     "ooevv": {"url": "https://verkehrsauskunft.ooevv.at/hamm/gate",
               "base": dict(_VAO, client={"id": "VAO", "type": "WEB", "name": "webapp", "l": "vs_ooevv", "v": 10022})},
 }
-# EFA (Mentz): Routenplaner der Wiener Linien (Open Data) und die Fahrplanauskunft der
-# Linz AG. Echtzeit-Abfahrten der Wiener Linien kommen aus ihrer Open-Data-Schnittstelle.
+# EFA (Mentz): die Fahrplanauskunft der Linz AG und der Open-Data-Routenplaner der Wiener
+# Linien - von ihm nur die Haltestellen, Verbindungen siehe CITY_PLANNERS. Echtzeit-
+# Abfahrten der Wiener Linien kommen aus ihrer Open-Data-Schnittstelle.
 EFA_SOURCES = {"wl": "https://www.wienerlinien.at/ogd_routing", "linzag": "https://www.linzag.at/static"}
 WL_MONITOR = "https://www.wienerlinien.at/ogd_realtime/monitor"
 # Ausserhalb Oesterreichs: Transitous (MOTIS 2), von Freiwilligen betrieben, mit den
@@ -84,6 +87,12 @@ SOURCE_NAMES = {"oebb": "ÖBB", "vor": "VOR", "ooevv": "OÖVV", "wl": "Wiener Li
 # Wiener Linien und Linz AG, Bundeslaender fuer die Verbuende.
 CITY_AREAS = {"wl": (16.18, 48.11, 16.58, 48.33), "linzag": (14.17, 48.21, 14.40, 48.38)}
 VERBUND_AREAS = {"ooevv": (12.75, 47.45, 14.60, 48.78), "vor": (14.45, 46.85, 17.17, 49.03)}
+# Wer Verbindungen innerhalb der Stadt rechnet: in Linz die Linz AG, in Wien die VAO (ueber
+# AnachB des VOR) - mit ihr rechnet auch die WienMobil-App der Wiener Linien. Deren
+# Open-Data-Routenplaner faehrt nach altem Fahrplan: Im Oktober 2026 kannte er die seit
+# September bis zum Stadion verlaengerte 18 und den neuen 78A nicht und schickte deshalb
+# auf Umwege mit einer Viertelstunde mehr.
+CITY_PLANNERS = {"wl": "vor", "linzag": "linzag"}
 # Oesterreichs Grenze (OpenStreetMap ueber Nominatim, auf rund 1 km vereinfacht), lon,lat:
 # entscheidet, wessen Fahrplaene gelten (Betreiber in Oesterreich oder Transitous) und
 # wo basemap.at die Karte hat. Der zweite Ring ist Jungholz.
@@ -230,12 +239,11 @@ ENRICH_LEGS = 3         # so viele Etappen je Suche bekommen Echtzeit vom Betrei
 
 # Welche Verbindungen sinnvoll sind (Zeiten in Sekunden). Zwei aehnliche Verbindungen
 # vergleicht der "Aufwand": Dauer, je Umstieg CHANGE_COST dazu, Fussweg und Rad zu
-# EFFORT_FACTOR. Eine andere ersetzt eine Verbindung, wenn sie hoechstens EARLIER_SLACK
-# frueher losgeht, hoechstens LATER_SLACK spaeter ankommt (LATER_SLACK_WAIT, wenn man
-# dafuer WAIT_GAIN spaeter losgeht) und BETTER_BY weniger Aufwand ist.
+# EFFORT_FACTOR. Eine andere ersetzt eine Verbindung nur, wenn sie nicht frueher losgeht,
+# hoechstens LATER_SLACK spaeter ankommt (LATER_SLACK_WAIT, wenn man dafuer WAIT_GAIN
+# spaeter losgeht) und BETTER_BY weniger Aufwand ist.
 CHANGE_COST = 5 * 60
 EFFORT_FACTOR = 0.5
-EARLIER_SLACK = 3 * 60
 LATER_SLACK = 3 * 60
 LATER_SLACK_WAIT = 5 * 60
 WAIT_GAIN = 10 * 60
@@ -775,6 +783,12 @@ def efa_trips(source, origin, destination, moment, arrive):
         trips = trips.get("trip")
         trips = trips if isinstance(trips, list) else [trips] if trips else []
     cons = [c for c in (parse_efa_trip(t, source) for t in trips or [] if isinstance(t, dict)) if c]
+    # Die EFA bringt auch Fahrten von kurz vor der Zeit mit (bei "jetzt" schon weg) - nur
+    # was ab der Zeit losgeht bzw. bis zu ihr ankommt (eine Minute Spiel: sie rechnet in Minuten)
+    if arrive:
+        cons = [c for c in cons if eff_time(c, "arr") <= moment + 60]
+    else:
+        cons = [c for c in cons if eff_time(c, "dep") >= moment - 60]
     if not cons:
         raise NoResult("No connections found.")
     return cons
@@ -2006,15 +2020,16 @@ def coord_place(place):
 
 
 def choose_planner(origin, destination):
-    """Wer die Verbindung rechnet: liegen Start und Ziel in Wien, die Wiener Linien, in
-    Linz die Linz AG, im selben Verbund VOR bzw. OÖVV, sonst in Oesterreich die ÖBB -
-    und alles ausserhalb oder ueber die Grenze Transitous."""
+    """Wer die Verbindung rechnet: liegen Start und Ziel in derselben Stadt, ihr Planer
+    (CITY_PLANNERS: in Wien die VAO wie in der WienMobil-App, in Linz die Linz AG), im
+    selben Verbund VOR bzw. OÖVV, sonst in Oesterreich die ÖBB - und alles ausserhalb oder
+    ueber die Grenze Transitous."""
     if not (in_austria(origin["latitude"], origin["longitude"])
             and in_austria(destination["latitude"], destination["longitude"])):
         return "motis"
     a = city_of(origin["latitude"], origin["longitude"])
     if a and a == city_of(destination["latitude"], destination["longitude"]):
-        return a
+        return CITY_PLANNERS[a]
     v = verbund_of(origin["latitude"], origin["longitude"])
     if v and v == verbund_of(destination["latitude"], destination["longitude"]):
         return v
@@ -2091,41 +2106,93 @@ def operator_stop(source, leg):
 def enrich_realtime(cons, planner, now):
     """Echtzeit vom Betreiber nachholen, wo ein anderer Planer gerechnet hat: Linien der
     Wiener Linien und der Linz AG bekommen ihre Abfahrtszeit aus deren Schnittstelle
-    (die ersten ENRICH_LEGS Etappen der naechsten zwei Stunden)."""
-    todo = []
+    (ENRICH_LEGS Abfahrten der naechsten zwei Stunden, zuerst die erste Fahrt jeder
+    Verbindung - nach ihr richtet sich, wann man los muss. Dieselbe Abfahrt in mehreren
+    Verbindungen, oft die U-Bahn am Anfang, zaehlt einmal.)"""
+    todo = {}               # Abfahrt -> [fruehester Platz in einer Verbindung, [(Verbindung, Etappe)]]
     for con in cons:
-        for leg in con["legs"]:
-            who = owner(leg) if leg["type"] == "ride" else None
+        rank = 0
+        for i, leg in enumerate(con["legs"]):
+            if leg["type"] != "ride":
+                continue
+            who = owner(leg)
             # nachholen, wo die Echtzeit nicht schon vom Betreiber selbst kommt
             if who in EFA_SOURCES and leg.get("rt_source") != SOURCE_NAMES[who] \
                     and now - 600 <= leg["dep"] <= now + 7200:
-                todo.append((who, leg))
-    jobs = {}
-    for n, (who, leg) in enumerate(todo[:ENRICH_LEGS]):
-        jobs[n] = (lambda w=who, l=leg: operator_departure(w, l, now))
+                entry = todo.setdefault((who, leg["from"], leg.get("line"), leg["dep"]), [rank, []])
+                entry[0] = min(entry[0], rank)
+                entry[1].append((con, i))
+            rank += 1
+    keys = sorted(todo, key=lambda k: todo[k][0])[:ENRICH_LEGS]
+    jobs = {n: (lambda w=key[0], c=todo[key][1][0]: operator_departure(w, c[0]["legs"][c[1]], now))
+            for n, key in enumerate(keys)}
     for n, found in run_parallel(jobs).items():
-        who, leg = todo[n]
-        if isinstance(found, dict):
-            leg["dep_real"] = found.get("real") if found.get("real") is not None else leg.get("dep_real")
-            leg["rt_source"] = SOURCE_NAMES[who]
-            if found.get("cancelled"):
-                leg["cancelled"] = True
-        elif isinstance(found, Exception):
+        who = keys[n][0]
+        if isinstance(found, Exception):
             log("no real-time from %s (%s)" % (SOURCE_NAMES[who], found))
+        elif isinstance(found, dict):
+            for con, i in todo[keys[n]][1]:
+                leg = con["legs"][i]
+                leg["rt_source"] = SOURCE_NAMES[who]
+                if found.get("real") is not None:
+                    leg["dep_real"] = found["real"]
+                    carry_delay(con, i, found["real"] - leg["dep"])
+                if found.get("cancelled"):
+                    leg["cancelled"] = True
+    for con in cons:
+        con["cancelled"] = any(l.get("cancelled") for l in con["legs"])
+
+
+def carry_delay(con, index, delay):
+    """Die nachgeholte Verspaetung einer Abfahrt weitertragen, wo der Planer keine Echtzeit
+    hat: an die Halte und die Ankunft dieser Fahrt und an die Fusswege danach bis zur
+    naechsten Fahrt - kommt keine mehr, an die Ankunft der Verbindung. Sonst fuehre die
+    U-Bahn mit +5 um 11:05 ab und kaeme um 11:04 an."""
+    legs = con["legs"]
+    leg = legs[index]
+    for stop in leg.get("stops") or []:
+        if stop.get("real") is None and stop.get("time") is not None:
+            stop["real"] = stop["time"] + delay
+    if leg.get("arr_real") is None:
+        leg["arr_real"] = leg["arr"] + delay
+    if index == 0:
+        con["dep_real"] = leg["dep_real"]
+    j = index + 1
+    while j < len(legs) and legs[j]["type"] != "ride":
+        for key in ("dep", "arr"):
+            if legs[j].get(key + "_real") is None:
+                legs[j][key + "_real"] = legs[j][key] + delay
+        j += 1
+    if j == len(legs):
+        con["arr_real"] = legs[-1]["arr_real"]
+
+
+def towards_same(a, b):
+    """Dasselbe Fahrtziel bei zwei Auskuenften? 'Wien Kaiserebersdorf, Zinnergasse' bei der
+    VAO heisst bei den Wiener Linien etwa 'Kaiserebersdorf, Zinnergasse' oder 'Zinnergasse':
+    ein Teil des einen Namens steckt im anderen."""
+    def parts(name):
+        name = re.sub(r"\([^)]*\)", "", str(name or ""))
+        return [p for p in (plain_name(part) for part in name.split(",")) if len(p) >= 4]
+    return any(x in y or y in x for x in parts(a) for y in parts(b))
 
 
 def operator_departure(source, leg, now):
-    """Die Abfahrt einer Etappe beim Betreiber: gleiche Linie, planmaessig hoechstens
-    90 Sekunden daneben."""
+    """Die Abfahrt einer Etappe beim Betreiber: gleiche Linie in dieselbe Richtung (wo
+    beide ein Ziel nennen - an der U-Bahn faehrt die Gegenrichtung oft zur selben Minute),
+    planmaessig hoechstens 90 Sekunden daneben."""
     stop = operator_stop(source, leg)
     if not stop:
         return None
     deps = wl_departures([stop], now).get(str(stop), []) if source == "wl" else efa_departures(source, stop, now, 40)
     best = None
     for dep in deps:
-        if dep["line"].lower() == str(leg.get("line") or "").lower() and abs(dep["planned"] - leg["dep"]) <= 90:
-            if best is None or abs(dep["planned"] - leg["dep"]) < abs(best["planned"] - leg["dep"]):
-                best = dep
+        if line_key(dep["line"]) != line_key(leg.get("line")) or abs(dep["planned"] - leg["dep"]) > 90:
+            continue
+        if dep.get("direction") and leg.get("direction") and not towards_same(dep["direction"], leg["direction"]):
+            continue
+        if best is None or abs(dep["planned"] - leg["dep"]) < abs(best["planned"] - leg["dep"]):
+            best = dep
     return best
 
 
@@ -2158,24 +2225,27 @@ def usable(con):
 
 
 def outdone(con, other):
-    """Ist other die sinnvollere Wahl als con? Ja, wenn other nicht frueher losgeht und
-    nicht spaeter ankommt, ohne mehr Umstiege und ohne viel mehr Fussweg (MORE_ON_FOOT) -
-    oder wenn other hoechstens EARLIER_SLACK frueher losgeht, hoechstens LATER_SLACK (bzw.
-    LATER_SLACK_WAIT) spaeter ankommt und klar weniger Aufwand ist. So fallen weg: 20
-    Minuten frueher los, um 3 Minuten frueher da zu sein; ein Umstieg mehr fuer eine
-    Minute; 25 Minuten Fussweg statt der Bim."""
+    """Ist other die sinnvollere Wahl als con? Nie, wenn other frueher losgeht: Wer sie
+    knapp verpasst, braucht con (und schon abgefahrene verdraengen so keine, die man noch
+    erreicht). Sonst ja, wenn other nicht spaeter ankommt, ohne mehr Umstiege und ohne viel
+    mehr Fussweg (MORE_ON_FOOT) - oder hoechstens LATER_SLACK (bzw. LATER_SLACK_WAIT)
+    spaeter ankommt und klar weniger Aufwand ist. So fallen weg: 20 Minuten frueher los,
+    um 3 Minuten frueher da zu sein; ein Umstieg mehr fuer eine Minute; 25 Minuten
+    Fussweg statt der Bim."""
     if other is con or not usable(other):
         return False
     dep, arr = eff_time(con, "dep"), eff_time(con, "arr")
     o_dep, o_arr = eff_time(other, "dep"), eff_time(other, "arr")
+    if o_dep < dep:
+        return False
     # ohne die Grenze beim Fussweg schloessen sich zwei Verbindungen gegenseitig aus: eine
     # Minute frueher da, aber eine Viertelstunde mehr zu Fuss - und umgekehrt der Aufwand
-    if o_dep >= dep and o_arr <= arr and other["changes"] <= con["changes"] \
+    if o_arr <= arr and other["changes"] <= con["changes"] \
             and walked(other) + cycled(other) <= walked(con) + cycled(con) + MORE_ON_FOOT \
             and (o_dep > dep or o_arr < arr or other["changes"] < con["changes"]):
         return True
     slack = LATER_SLACK_WAIT if o_dep - dep >= WAIT_GAIN else LATER_SLACK
-    return o_dep >= dep - EARLIER_SLACK and o_arr <= arr + slack and effort(other) + BETTER_BY <= effort(con)
+    return o_arr <= arr + slack and effort(other) + BETTER_BY <= effort(con)
 
 
 def walk_instead(con, walk):
@@ -3761,7 +3831,7 @@ def ride_content(leg, prefix):
         grid.set_margin_top(4)
         for i, stop in enumerate(stops):
             if stop.get("time") is not None:
-                grid.attach(label(clock(eff_time(stop, "time") if stop.get("real") is not None else stop["time"],
+                grid.attach(label(clock(stop["real"] if stop.get("real") is not None else stop["time"],
                                         stop.get("tz") or leg.get("dep_tz")),
                                   "tr-sub", "dim-label", xalign=1.0), 0, i, 1, 1)
             grid.attach(label(short_name(stop["name"], prefix) + (" (cancelled)" if stop.get("cancelled") else ""),
