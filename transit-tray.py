@@ -8,9 +8,9 @@ Auto. Im Stil der anderen Widgets (weather-tray.py, pomodoro-tray.py).
 Das Symbol ist das Haltestellen-H. Das Menue zeigt fuer die Haltestellen bei dir die
 naechsten Abfahrten mit Uhrzeit und Verspaetung; was man zu Fuss nicht mehr
 erreicht, faellt weg. Ein Klick auf eine Abfahrt zeigt ihren Fahrtverlauf, "Plan a
-route..." oeffnet den Routenplaner, "Home & stops..." die Wahl von Zuhause, der
-Haltestellen (Reihenfolge; welche Linien und Richtungen sie zeigen) und den
-TomTom-Schluessel.
+route..." oeffnet den Routenplaner (gespeicherte und letzte Ziele zur Wahl, der Stern
+speichert ein Ziel), "Home & stops..." die Wahl von Zuhause, der Haltestellen
+(Reihenfolge; welche Linien und Richtungen sie zeigen) und den TomTom-Schluessel.
 
 In Oesterreich kommt jedes Verkehrsmittel von der Schnittstelle seines Betreibers:
 Wiener Linien (Open Data), Linz AG (EFA), ÖBB (Zuege, Postbus), VOR und OÖVV
@@ -184,7 +184,7 @@ MAP_CREDITS = {"basemap": "basemap.at", "osm": "© OpenStreetMap contributors"}
 
 APP_URL = "https://github.com/magnusgoeppel/transit-tray"
 # Transitous und die OpenStreetMap-Kacheln verlangen Name, Version und Kontakt
-HEADERS = {"Accept": "application/json", "Accept-Encoding": "gzip", "User-Agent": "transit-tray/3.2 (+%s)" % APP_URL}
+HEADERS = {"Accept": "application/json", "Accept-Encoding": "gzip", "User-Agent": "transit-tray/3.3 (+%s)" % APP_URL}
 TIMEOUT = 20
 
 # Abfragen
@@ -234,6 +234,8 @@ WALK_SPEED = 75         # m je Minute auf Luftlinie * 1,3, wenn kein Router antw
 MENU_ROWS = 10          # Abfahrtszeilen im Menue insgesamt
 SLOTS = 16              # Zeilen ueber dem Trenner (Ueberschriften, Abfahrten, Hinweise)
 RECENT_MAX = 6          # zuletzt gesuchte Ziele
+SAVED_MAX = 20          # gespeicherte Ziele
+LABEL_MAX = 40          # Zeichen fuer den eigenen Namen eines gespeicherten Ziels
 TRIPS = 5               # Verbindungen je Suche
 ENRICH_LEGS = 3         # so viele Etappen je Suche bekommen Echtzeit vom Betreiber nachgeholt
 
@@ -2606,6 +2608,33 @@ def clean_place(place):
     return out
 
 
+def clean_saved(place):
+    """Gespeichertes Ziel: ein Ort, dazu der eigene Name ("label"), falls vergeben."""
+    out = clean_place(place)
+    text = str(place.get("label") or "").strip()[:LABEL_MAX] if out else ""
+    if text and text != out["name"]:
+        out["label"] = text
+    return out
+
+
+def same_place(a, b):
+    """Derselbe Ort: gleicher Name (der eigene eines gespeicherten Ziels steht extra) an
+    derselben Stelle."""
+    return a["name"] == b["name"] and distance_m(a["latitude"], a["longitude"], b["latitude"], b["longitude"]) < 20
+
+
+def place_title(place):
+    """So heisst ein Ort im Feld und in den Listen: ein gespeichertes Ziel mit eigenem Namen so."""
+    return place.get("label") or place["name"]
+
+
+def place_sub(place):
+    """Die zweite Zeile darunter - mit eigenem Namen auch, welcher Ort es ist."""
+    if place.get("label"):
+        return " · ".join(t for t in (place["name"], place.get("sub")) if t)
+    return place.get("sub") or ""
+
+
 def clean_stop(stop):
     if not isinstance(stop, dict) or not stop.get("name"):
         return None
@@ -2625,9 +2654,9 @@ def clean_stop(stop):
 
 
 def load_settings():
-    """{"home", "stops", "prefix", "recent", "tomtom_key", "traffic_layer", "filters"};
-    ohne Datei (erster Start) leer. filters bleiben auch fuer abgewaehlte Haltestellen
-    stehen - hakt man sie wieder an, gilt ihr Filter wieder."""
+    """{"home", "stops", "prefix", "saved", "recent", "tomtom_key", "traffic_layer",
+    "filters"}; ohne Datei (erster Start) leer. filters bleiben auch fuer abgewaehlte
+    Haltestellen stehen - hakt man sie wieder an, gilt ihr Filter wieder."""
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -2643,6 +2672,7 @@ def load_settings():
     filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
     filters = {str(k): r for k, r in ((k, clean_rules(v)) for k, v in filters.items()) if r}
     return {"home": clean_place(data.get("home")), "stops": stops, "prefix": str(data.get("prefix") or ""),
+            "saved": [p for p in (clean_saved(p) for p in data.get("saved") or []) if p][:SAVED_MAX],
             "recent": [p for p in (clean_place(p) for p in data.get("recent") or []) if p][:RECENT_MAX],
             "tomtom_key": key or None, "traffic_layer": bool(data.get("traffic_layer", True)), "filters": filters}
 
@@ -2713,6 +2743,8 @@ def _dots(*points, r=0.8):
     return "".join('<circle cx="%s" cy="%s" r="%s" fill="#ffffff"/>' % (x, y, r) for x, y in points)
 
 
+_STAR = "M8 1.85 L9.62 6.23 L14.28 6.41 L10.62 9.3 L11.88 13.79 L8 11.2 L4.12 13.79 L5.38 9.3 L1.72 6.41 L6.38 6.23 Z"
+
 SYMBOLS = {
     "stop": _SYMBOL % ('<circle cx="8" cy="6.25" r="4.75"/><path d="M8 11 V14.75"/>'
                        '<path d="M6.4 4.25 V8.25 M9.6 4.25 V8.25 M6.4 6.25 H9.6"/>', ""),
@@ -2764,6 +2796,10 @@ SYMBOLS = {
     # Umstieg: zwei Pfeile in entgegengesetzte Richtungen
     "change": _SYMBOL % ('<path d="M2.5 5.25 H12.5 M10 2.75 L12.5 5.25 L10 7.75"/>'
                          '<path d="M13.5 10.75 H3.5 M6 8.25 L3.5 10.75 L6 13.25"/>', ""),
+    # Ziele: Stern zum Speichern (gefuellt = gespeichert), Kreuz zum Entfernen
+    "star": _SYMBOL % ('<path d="%s"/>' % _STAR, ""),
+    "starred": _SYMBOL % ('<path d="%s"/>' % _STAR, '<path d="%s" fill="#ffffff"/>' % _STAR),
+    "close": _SYMBOL % ('<path d="M4.25 4.25 L11.75 11.75 M11.75 4.25 L4.25 11.75"/>', ""),
 }
 KIND_NAMES = {"train": "train", "subway": "U-Bahn", "tram": "tram", "bus": "bus", "ferry": "ferry"}
 MODES = (("transit", ("tram",), "Transit"), ("mixed", ("bike", "tram"), "Bike + transit (park the bike at a stop)"),
@@ -3394,12 +3430,67 @@ class Tray:
 
         threading.Thread(target=work, daemon=True).start()
 
+    # -- Gespeicherte und letzte Ziele. Ein Ort steht in hoechstens einer der beiden Listen;
+    # das Fenster baut seine Listen danach selbst neu auf.
+
     def remember(self, place):
-        """Ein gesuchtes Ziel vorn in die Liste der letzten Ziele."""
-        recent = [p for p in self.settings.get("recent") or []
-                  if (p["name"], round(p["latitude"], 4), round(p["longitude"], 4))
-                  != (place["name"], round(place["latitude"], 4), round(place["longitude"], 4))]
-        self.settings["recent"] = ([dict(place)] + recent)[:RECENT_MAX]
+        """Ein gesuchtes Ziel vorn in die Liste der letzten Ziele - ein gespeichertes nicht,
+        das steht schon unter "Saved"."""
+        if self.saved_index(place) is not None:
+            return
+        recent = [p for p in self.settings.get("recent") or [] if not same_place(p, place)]
+        self.settings["recent"] = ([clean_place(place)] + recent)[:RECENT_MAX]
+        save_settings(self.settings)
+
+    def saved_index(self, place):
+        return next((i for i, p in enumerate(self.settings.get("saved") or []) if same_place(p, place)), None)
+
+    def save_place(self, place):
+        """Ein Ziel speichern: hinten an die gespeicherten, aus den letzten heraus."""
+        saved = list(self.settings.get("saved") or [])
+        if self.saved_index(place) is not None or len(saved) >= SAVED_MAX:
+            return
+        self.settings["saved"] = saved + [clean_saved(place)]
+        self.forget_recent(place)               # speichert auch
+
+    def unsave_place(self, place):
+        self.settings["saved"] = [p for p in self.settings.get("saved") or [] if not same_place(p, place)]
+        save_settings(self.settings)
+
+    def rename_saved(self, place, text):
+        """Eigener Name; leer oder gleich dem Ortsnamen heisst: der Ortsname gilt."""
+        index = self.saved_index(place)
+        if index is None:
+            return
+        saved = list(self.settings["saved"])
+        saved[index] = clean_saved(dict(saved[index], label=text)) or saved[index]
+        self.settings["saved"] = saved
+        save_settings(self.settings)
+
+    def move_saved(self, index, step):
+        saved = list(self.settings.get("saved") or [])
+        other = index + step
+        if 0 <= index < len(saved) and 0 <= other < len(saved):
+            saved[index], saved[other] = saved[other], saved[index]
+            self.settings["saved"] = saved
+            save_settings(self.settings)
+
+    def forget_recent(self, place):
+        self.settings["recent"] = [p for p in self.settings.get("recent") or [] if not same_place(p, place)]
+        save_settings(self.settings)
+
+    def clear_recent(self):
+        """Die letzten Ziele leeren; zurueck kommt die alte Liste (fuer "Undo")."""
+        old = list(self.settings.get("recent") or [])
+        self.settings["recent"] = []
+        save_settings(self.settings)
+        return old
+
+    def restore_recent(self, old):
+        """Undo nach dem Leeren: was inzwischen dazukam, bleibt vorn."""
+        recent = list(self.settings.get("recent") or [])
+        recent += [p for p in old if not any(same_place(p, q) for q in recent) and self.saved_index(p) is None]
+        self.settings["recent"] = recent[:RECENT_MAX]
         save_settings(self.settings)
 
     def open_window(self, page="route", dep=None, stop=None, token=None):
@@ -3528,6 +3619,30 @@ UI_CSS = """
 .tr-order:hover .tr-glyph { color: @window_fg_color; }
 .tr-order:disabled .tr-glyph { color: alpha(@window_fg_color, 0.22); }
 .tr-order.tr-active .tr-glyph, .tr-order.tr-active:hover .tr-glyph { color: @accent_color; }
+.tr-link {
+    padding: 1px 7px;
+    min-height: 0;
+    min-width: 0;
+    border-radius: 7px;
+    border: none;
+    background-image: none;
+    background-color: transparent;
+    box-shadow: none;
+}
+.tr-link label { font-size: 12px; font-weight: 600; color: alpha(@window_fg_color, 0.70); }
+.tr-link:hover { background-color: alpha(@window_fg_color, 0.10); }
+.tr-link:hover label { color: @window_fg_color; }
+.tr-link.tr-active label { color: @accent_color; }
+.tr-rename, .tr-rename:focus {
+    min-height: 28px;
+    padding: 0 8px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background-image: none;
+    box-shadow: none;
+    background-color: alpha(@window_fg_color, 0.06);
+}
+.tr-rename:focus { border-color: alpha(@accent_color, 0.65); }
 .tr-chipbtn {
     padding: 2px;
     min-width: 0;
@@ -3661,6 +3776,45 @@ def chip(kind, line, cancelled=False):
     box.pack_start(icon(kind, 13), False, False, 0)
     box.pack_start(label(line), False, False, 0)
     return box
+
+
+def when_clicked(button, callback):
+    """callback erst nach dem Klick: Meist baut er die Liste neu auf, samt dem Knopf. Den
+    Fokus nimmt der Knopf nicht - er bleibt etwa im Eingabefeld darueber."""
+    def run():
+        callback()
+        return GLib.SOURCE_REMOVE
+    button.set_focus_on_click(False)
+    button.connect("clicked", lambda _b: GLib.idle_add(run))
+    return button
+
+
+def tool_button(key, tip, callback):
+    """Kleiner flacher Knopf mit eigenem Symbol neben einem Eintrag: Pfeile, Stern, Kreuz."""
+    button = styled(Gtk.Button(), "tr-order")
+    button.add(icon(key, 14))
+    button.set_tooltip_text(tip)
+    button.set_valign(Gtk.Align.CENTER)
+    return when_clicked(button, callback)
+
+
+def link_button(text, callback, active=False):
+    """Flacher Textknopf rechts in einer Ueberschrift: "Edit", "Clear", "Undo"."""
+    button = styled(Gtk.Button(label=text), "tr-link", "tr-active" if active else None)
+    button.set_valign(Gtk.Align.CENTER)
+    return when_clicked(button, callback)
+
+
+def place_row(place, key):
+    """Ein Ort in einer Liste: Symbol, Name, darunter Adresse oder Gegend."""
+    row = Gtk.Box(spacing=10)
+    row.pack_start(icon(key, 16, "dim-label"), False, False, 0)
+    text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+    text.pack_start(label(place_title(place), "tr-name", ellipsize=True), False, False, 0)
+    if place_sub(place):
+        text.pack_start(label(place_sub(place), "tr-sub", "dim-label", ellipsize=True), False, False, 0)
+    row.pack_start(text, True, True, 0)
+    return row
 
 
 def header_bar(win, subtitle=None):
@@ -3941,7 +4095,8 @@ def bike_content(leg, park=False):
 class PlaceEntry:
     """Eingabefeld fuer Start oder Ziel: Tippen sucht Haltestellen, Adressen und Ziele,
     die Treffer erscheinen darunter (Klick oder Enter fuer den ersten). Leer und mit
-    Fokus zeigt es Zuhause und die letzten Ziele."""
+    Fokus zeigt es Zuhause, die gespeicherten und die letzten Ziele - letzte mit einem
+    Kreuz zum Entfernen."""
 
     def __init__(self, owner, placeholder):
         self.owner = owner
@@ -3975,18 +4130,20 @@ class PlaceEntry:
     def set_place(self, place, text=None):
         self.popover.popdown()
         self.quiet = True
-        self.entry.set_text(text if text is not None else (place["name"] if place else ""))
+        self.entry.set_text(text if text is not None else (place_title(place) if place else ""))
         self.quiet = False
         self.place = place
         self.entry.set_position(-1)
 
     def suggestions(self):
-        """Ohne Suchtext: Zuhause und die letzten Ziele."""
+        """Ohne Suchtext: Zuhause, die gespeicherten und die letzten Ziele."""
         found = []
-        home = self.owner.tray.settings.get("home")
+        settings = self.owner.tray.settings
+        home = settings.get("home")
         if home:
             found.append(dict(home, name="Home", sub=home["name"], home=True))
-        found.extend(dict(p, recent=True) for p in self.owner.tray.settings.get("recent") or [])
+        found.extend(dict(p, saved=True) for p in settings.get("saved") or [])
+        found.extend(dict(p, recent=True) for p in settings.get("recent") or [])
         return found
 
     def on_changed(self, _entry):
@@ -4030,15 +4187,12 @@ class PlaceEntry:
             child.destroy()
         self.places = places
         for place in places:
-            row = Gtk.Box(spacing=10)
-            key = "home" if place.get("home") else "clock" if place.get("recent") else \
-                "stop" if place["type"] == "S" else "pin"
-            row.pack_start(icon(key, 16, "dim-label"), False, False, 0)
-            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-            text.pack_start(label(place["name"], "tr-name", ellipsize=True), False, False, 0)
-            if place.get("sub"):
-                text.pack_start(label(place["sub"], "tr-sub", "dim-label", ellipsize=True), False, False, 0)
-            row.pack_start(text, True, True, 0)
+            key = "home" if place.get("home") else "starred" if place.get("saved") else \
+                "clock" if place.get("recent") else "stop" if place["type"] == "S" else "pin"
+            row = place_row(place, key)
+            if place.get("recent"):
+                row.pack_end(tool_button("close", "Remove from recent destinations", lambda p=place: self.forget(p)),
+                             False, False, 0)
             self.list.add(row)
         if note:
             row = Gtk.ListBoxRow(activatable=False, selectable=False)
@@ -4052,10 +4206,16 @@ class PlaceEntry:
 
     def choose(self, place):
         self.popover.popdown()
-        place = {k: v for k, v in place.items() if k not in ("home", "recent")}
-        is_home = self.owner.tray.settings.get("home") and place.get("name") == "Home"
+        is_home = bool(place.get("home"))
+        place = {k: v for k, v in place.items() if k not in ("home", "saved", "recent")}
         self.set_place(place)
-        self.owner.place_chosen(self, place, bool(is_home))
+        self.owner.place_chosen(self, place, is_home)
+
+    def forget(self, place):
+        """Kreuz neben einem letzten Ziel: weg damit, die Liste bleibt offen."""
+        self.owner.tray.forget_recent(place)
+        self.show_places(self.suggestions())
+        self.owner.saved_changed()
 
     def on_row(self, _list, row):
         index = row.get_index()
@@ -4859,6 +5019,8 @@ class TransitWindow:
         self.traffic_toggles = []
         self.views = []
         self.line_filter = None         # offenes Filter-Popover einer Haltestelle
+        self.editing = False            # gespeicherte Ziele bearbeiten (Startliste)
+        self.cleared = None             # die letzten Ziele vor "Clear", fuer "Undo"
 
         win = self.window = Gtk.Window(title="Transit")
         win.set_default_size(1180, 720)
@@ -4885,6 +5047,7 @@ class TransitWindow:
         self.time_box.set_visible(False)
         self.paging_box.set_visible(False)
         self.update_traffic_buttons()
+        self.update_star()
 
         home = tray.settings.get("home")
         if home:
@@ -4912,7 +5075,15 @@ class TransitWindow:
         places.attach(self.from_entry.entry, 1, 0, 1, 1)
         places.attach(styled(Gtk.Box(), "tr-rule"), 1, 1, 1, 1)
         places.attach(icon("pin", 16, "dim-label"), 0, 2, 1, 1)
-        places.attach(self.to_entry.entry, 1, 2, 1, 1)
+        to_row = Gtk.Box(spacing=2)
+        to_row.pack_start(self.to_entry.entry, True, True, 0)
+        self.star_glyph = Glyph("star", 14)
+        self.star = styled(Gtk.Button(), "tr-order")
+        self.star.add(self.star_glyph.widget)
+        self.star.set_valign(Gtk.Align.CENTER)
+        when_clicked(self.star, self.on_star)
+        to_row.pack_start(self.star, False, False, 0)
+        places.attach(to_row, 1, 2, 1, 1)
         swap = Gtk.Button()
         swap.add(icon("swap", 16))
         swap.set_relief(Gtk.ReliefStyle.NONE)
@@ -5105,18 +5276,24 @@ class TransitWindow:
                 self.to_entry.entry.grab_focus()
         elif not is_home:
             self.tray.remember(place)
+        self.update_star()
         self.search()
 
     def place_cleared(self, entry):
+        """Im Feld wird getippt. Ist das Ziel ganz geloescht, gehen auch seine Ergebnisse -
+        die Liste zeigt wieder die gespeicherten und letzten Ziele."""
         if entry is self.from_entry:
             self.from_icon.set("pin")
+            return
+        self.update_star()
+        if self.searched and not entry.entry.get_text().strip():
+            self.search()
 
     def place_left(self, entry):
         """Feld verlassen ohne Treffer zu waehlen: alten Ort wiederherstellen? Nein -
         das Feld bleibt, wie es ist; gesucht wird erst mit einem gewaehlten Ort."""
-        if entry is self.to_entry and not entry.entry.get_text().strip():
-            self.results = {}
-            self.show_list()
+        if entry is self.to_entry and not entry.entry.get_text().strip() and self.searched:
+            self.search()
 
     def home_changed(self):
         """Zuhause neu gewaehlt: steht im Start "Home", gilt das neue."""
@@ -5125,6 +5302,7 @@ class TransitWindow:
             self.from_entry.set_place(dict(home, name="Home"), "Home")
             self.from_icon.set("home")
             self.search()
+        self.update_star()
         self.departures_changed()
 
     def on_swap(self, _button):
@@ -5133,6 +5311,7 @@ class TransitWindow:
         self.from_entry.set_place(b, b_text)
         self.to_entry.set_place(a, a_text)
         self.from_icon.set("home" if b_text == "Home" else "pin")
+        self.update_star()
         self.search()
 
     def on_when(self, combo):
@@ -5189,6 +5368,7 @@ class TransitWindow:
             self.show_list()
             return
         self.searched = (origin, destination, moment)
+        self.editing, self.cleared = False, None
         for mode in self.mode_buttons:
             self.mode_labels[mode].set_text("…")
         self.status.set_text("Searching…")
@@ -5349,10 +5529,10 @@ class TransitWindow:
             child.destroy()
 
     def list_content(self):
-        """Was die Routenliste zeigt: ("recent"|"wait"|"note", Text) oder ("items",
+        """Was die Routenliste zeigt: ("start"|"wait"|"note", Text) oder ("items",
         [Eintrag], Hinweis) - Eintrag ("con", Verbindung) bzw. ("direct", Route, andere)."""
         if not self.searched:
-            return ("recent", None)
+            return ("start", None)
         result = self.results.get(self.mode)
         if result is None:
             return ("wait", "Searching…")
@@ -5377,7 +5557,7 @@ class TransitWindow:
         return (item[0], (item[1] or {}).get("name"))
 
     def show_list(self, keep=False):
-        """Die Routenliste fuer das gewaehlte Verkehrsmittel; ohne Suche die letzten Ziele.
+        """Die Routenliste fuer das gewaehlte Verkehrsmittel; ohne Suche die Ziele zur Wahl.
         keep: nur neu aufbauen, wenn sich etwas geaendert hat, und die Auswahl behalten -
         fuer Ergebnisse, die nachtraeglich ankommen (zu Fuss filtert die Oeffis mit)."""
         content = self.list_content()
@@ -5397,11 +5577,11 @@ class TransitWindow:
         if isinstance(result, dict) and transit:
             self.earlier.set_sensitive(bool(result.get("earlier")))
             self.later.set_sensitive(bool(result.get("later")))
-        if content[0] == "recent":
+        if content[0] == "start":
             for mode in self.mode_labels:
                 self.mode_labels[mode].set_text("–")
             self.status.set_text("")
-            self.show_recent()
+            self.show_start()
             return
         if content[0] in ("wait", "note"):
             self.add_note(self.route_list, content[1])
@@ -5432,34 +5612,89 @@ class TransitWindow:
         if row is not None:
             self.route_list.select_row(row)
 
-    def show_recent(self):
-        recent = self.tray.settings.get("recent") or []
-        if not recent:
-            self.add_note(self.route_list, "Type an address, a stop or a place.")
+    def show_start(self):
+        """Ohne Suche die Ziele zur Wahl: oben die gespeicherten ("Edit": eigene Namen,
+        Reihenfolge, entfernen), darunter die letzten - der Stern speichert eines, das
+        Kreuz entfernt es, "Clear" leert die Liste (mit "Undo")."""
+        settings = self.tray.settings
+        saved, recent = settings.get("saved") or [], settings.get("recent") or []
+        self.editing = self.editing and bool(saved)
+        if not saved and not recent and self.cleared is None:
+            self.add_note(self.route_list, "Type an address, a stop or a place. The star next to a destination "
+                                           "keeps it here.")
         else:
-            header = Gtk.ListBoxRow(activatable=False, selectable=False)
-            header.add(label("Recent destinations", "tr-section", "tr-sub"))
-            styled(header, "tr-head")
-            self.route_list.add(header)
-            self.list_items.append(None)
+            self.add_head("Saved", link_button("Done" if self.editing else "Edit", self.on_edit, self.editing)
+                          if saved else None)
+            if not saved:
+                self.add_note(self.route_list, "The star next to a destination keeps it here.")
+            for index, place in enumerate(saved):
+                widget = self.saved_editor(place, index, len(saved)) if self.editing else place_row(place, "starred")
+                self.add_row(self.route_list, widget, ("saved", place), activatable=not self.editing)
+            if recent or self.cleared:
+                self.add_head("Recent", link_button("Clear", self.on_clear) if recent else
+                              link_button("Undo", self.on_undo))
+            if not recent and self.cleared:
+                self.add_note(self.route_list, "Recent destinations cleared.")
+            full = len(saved) >= SAVED_MAX
             for place in recent:
-                box = Gtk.Box(spacing=10)
-                box.pack_start(icon("clock", 16, "dim-label"), False, False, 0)
-                text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-                text.pack_start(label(place["name"], "tr-name", ellipsize=True), False, False, 0)
-                if place.get("sub"):
-                    text.pack_start(label(place["sub"], "tr-sub", "dim-label", ellipsize=True), False, False, 0)
-                box.pack_start(text, True, True, 0)
-                self.add_row(self.route_list, box, ("recent", place))
+                row = place_row(place, "clock")
+                row.pack_end(tool_button("close", "Remove from recent destinations",
+                                         lambda p=place: self.forget_recent(p)), False, False, 0)
+                star = tool_button("star", "Save this destination", lambda p=place: self.save(p))
+                star.set_sensitive(not full)
+                if full:
+                    star.set_tooltip_text("You can save up to %d destinations" % SAVED_MAX)
+                row.pack_end(star, False, False, 0)
+                self.add_row(self.route_list, row, ("recent", place))
             self.route_list.show_all()
-        if self.tray.settings.get("home"):
+        if self.editing:
+            self.route_detail.message("Give your saved destinations your own names, order them with the arrows "
+                                      "or remove them. “Done” or Esc when you are finished.")
+        elif self.tray.settings.get("home"):
             self.route_detail.message("Where to? Type an address, a stop or a place above.")
         else:
             self.route_detail.message("Type a start and a destination above.\n\n"
                                       "Set your home under “Home & stops…” in the menu - then it is the start.")
 
-    def add_row(self, listbox, widget, item):
-        row = Gtk.ListBoxRow()
+    def add_head(self, text, button=None):
+        """Ueberschrift in der Routenliste, rechts davon ein Textknopf."""
+        head = styled(Gtk.ListBoxRow(activatable=False, selectable=False), "tr-head")
+        box = Gtk.Box(spacing=6)
+        box.pack_start(label(text, "tr-section", "tr-sub"), True, True, 0)
+        if button is not None:
+            box.pack_end(button, False, False, 0)
+        head.add(box)
+        self.route_list.add(head)
+        self.list_items.append(None)
+
+    def saved_editor(self, place, index, count):
+        """Ein gespeichertes Ziel beim Bearbeiten: sein Name im Feld (leer = der Ortsname),
+        darunter welcher Ort es ist; Pfeile ordnen, das Kreuz entfernt."""
+        row = Gtk.Box(spacing=10)
+        row.pack_start(icon("starred", 16, "dim-label"), False, False, 0)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        name = styled(Gtk.Entry(text=place_title(place), placeholder_text=place["name"], max_length=LABEL_MAX,
+                                width_chars=1, hexpand=True), "tr-rename")
+        name.connect("changed", lambda entry: self.tray.rename_saved(place, entry.get_text()))
+        name.connect("activate", lambda _entry: self.on_edit())
+        text.pack_start(name, False, False, 0)
+        where = " · ".join(t for t in (place["name"], place.get("sub")) if t)
+        text.pack_start(label(where, "tr-sub", "dim-label", ellipsize=True), False, False, 0)
+        row.pack_start(text, True, True, 0)
+        tools = Gtk.Box(spacing=2)
+        for key, step, tip in (("up", -1, "Move this destination up"), ("down", 1, "Move this destination down")):
+            if count < 2:
+                break
+            button = tool_button(key, tip, lambda s=step: self.move_saved(index, s))
+            button.set_sensitive(0 <= index + step < count)
+            tools.pack_start(button, False, False, 0)
+        tools.pack_start(tool_button("close", "Remove from saved destinations", lambda: self.unsave(place)),
+                         False, False, 0)
+        row.pack_end(tools, False, False, 0)
+        return row
+
+    def add_row(self, listbox, widget, item, activatable=True):
+        row = Gtk.ListBoxRow(activatable=activatable)
         row.add(widget)
         listbox.add(row)
         row.show_all()
@@ -5481,14 +5716,15 @@ class TransitWindow:
 
     def on_route_activated(self, _list, row):
         item = self.item_at(row)
-        if item and item[0] == "recent":
+        if item and item[0] in ("saved", "recent"):
             self.to_entry.set_place(item[1])
             self.tray.remember(item[1])
+            self.update_star()
             self.search()
 
     def on_route_selected(self, _list, row):
         item = self.item_at(row)
-        if not item or item[0] == "recent":
+        if not item or item[0] in ("saved", "recent"):
             return
         origin, destination, _moment = self.searched
         prefix = self.tray.settings.get("prefix") or ""
@@ -5514,6 +5750,77 @@ class TransitWindow:
     def update_leave(self, now):
         for widget, con in self.leave_labels:
             widget.set_text(leave_text(con, now))
+
+    # -- Gespeicherte und letzte Ziele
+
+    def update_star(self):
+        """Der Stern neben dem Ziel speichert es bzw. nimmt es wieder heraus - gefuellt und
+        tuerkis, solange es gespeichert ist. Nicht bei Zuhause, das steht immer oben."""
+        place, home = self.to_entry.place, self.tray.settings.get("home")
+        show = place is not None and not (home and distance_m(place["latitude"], place["longitude"],
+                                                              home["latitude"], home["longitude"]) < 20)
+        self.star.set_visible(bool(show))
+        if not show:
+            return
+        saved = self.tray.saved_index(place) is not None
+        full = not saved and len(self.tray.settings.get("saved") or []) >= SAVED_MAX
+        self.star_glyph.set("starred" if saved else "star")
+        if saved:
+            self.star.get_style_context().add_class("tr-active")
+            self.star.set_tooltip_text("Remove from saved destinations")
+        else:
+            self.star.get_style_context().remove_class("tr-active")
+            self.star.set_tooltip_text("You can save up to %d destinations" % SAVED_MAX if full
+                                       else "Save this destination")
+        self.star.set_sensitive(not full)
+
+    def on_star(self):
+        """Wieder herausgenommen kommt das Ziel zurueck zu den letzten - wie vor dem Speichern."""
+        place = self.to_entry.place
+        if place is None:
+            return
+        if self.tray.saved_index(place) is None:
+            self.tray.save_place(place)
+        else:
+            self.tray.unsave_place(place)
+            self.tray.remember(place)
+        self.saved_changed()
+
+    def saved_changed(self):
+        """Gespeicherte oder letzte Ziele haben sich geaendert: Stern und Startliste neu."""
+        self.update_star()
+        if not self.searched:
+            self.show_list()
+
+    def save(self, place):
+        self.tray.save_place(place)
+        self.saved_changed()
+
+    def unsave(self, place):
+        self.tray.unsave_place(place)
+        self.saved_changed()
+
+    def move_saved(self, index, step):
+        self.tray.move_saved(index, step)
+        self.saved_changed()
+
+    def forget_recent(self, place):
+        self.tray.forget_recent(place)
+        self.saved_changed()
+
+    def on_edit(self):
+        """"Edit" bzw. "Done": die Namen gelten schon beim Tippen."""
+        self.editing = not self.editing
+        self.saved_changed()
+
+    def on_clear(self):
+        self.cleared = self.tray.clear_recent()
+        self.saved_changed()
+
+    def on_undo(self):
+        self.tray.restore_recent(self.cleared or [])
+        self.cleared = None
+        self.saved_changed()
 
     # -- Abfahrten
 
@@ -5581,13 +5888,8 @@ class TransitWindow:
         if count < 2:
             return head
         for key, step, tip in (("up", -1, "Move this stop up"), ("down", 1, "Move this stop down")):
-            button = styled(Gtk.Button(), "tr-order")
-            button.add(icon(key, 14))
-            button.set_tooltip_text(tip)
-            button.set_valign(Gtk.Align.CENTER)
+            button = tool_button(key, tip, lambda s=step: self.tray.move_stop(index, s))
             button.set_sensitive(0 <= index + step < count)
-            # erst nach dem Klick: die Liste wird dabei neu aufgebaut, samt diesem Knopf
-            button.connect("clicked", lambda _b, s=step: GLib.idle_add(self.tray.move_stop, index, s))
             head.pack_start(button, False, False, 0)
         return head
 
@@ -5686,6 +5988,9 @@ class TransitWindow:
                 if entry.popover.get_visible():
                     entry.popover.popdown()
                     return True
+            if self.editing:
+                self.on_edit()
+                return True
             self.window.destroy()
             return True
         return False
@@ -6606,13 +6911,8 @@ class HomeWindow:
             for key, step, tip in (("up", -1, "Move this stop up"), ("down", 1, "Move this stop down")):
                 if count < 2:
                     break
-                button = styled(Gtk.Button(), "tr-order")
-                button.add(icon(key, 14))
-                button.set_tooltip_text(tip)
-                button.set_valign(Gtk.Align.CENTER)
+                button = tool_button(key, tip, lambda s=step: self.tray.move_stop(index, s))
                 button.set_sensitive(0 <= index + step < count)
-                # erst nach dem Klick: die Liste wird dabei neu aufgebaut, samt diesem Knopf
-                button.connect("clicked", lambda _b, s=step: GLib.idle_add(self.tray.move_stop, index, s))
                 tools.pack_start(button, False, False, 0)
         box.pack_end(tools, False, False, 0)
         kinds = Gtk.Box(spacing=4)

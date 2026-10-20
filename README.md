@@ -11,6 +11,7 @@ Ein Statusleisten-Widget für Linux (gebaut für COSMIC auf Pop!_OS, läuft übe
 - **Routenplaner:** Öffis, Rad + Öffis, Rad, zu Fuß und Auto auf einmal. Der Verlauf zeigt jede Etappe mit Steig, Umstiege mit Fußweg und Wartezeit (auch innerhalb einer Station, etwa „stairs up“), und die Strecke auf der Karte. Wo der Planer keine Echtzeit hat (etwa die U-Bahn), holt das Widget sie beim Betreiber nach und rechnet eine Verspätung bis zur Ankunft weiter.
 - **Nur sinnvolle Verbindungen:** Eine Verbindung fällt weg, wenn eine andere nicht früher losgeht, höchstens 3 Minuten später ankommt (5, wenn man dafür 10 Minuten später losgeht) und klar weniger Aufwand ist – Dauer plus 5 Minuten je Umstieg plus die Hälfte von Fußweg und Rad. Weg sind damit etwa „20 Minuten früher los für 3 Minuten früher da“ oder 25 Minuten Fußweg statt der Bim. Eine frühere Verbindung verdrängt nie eine spätere: Wer sie knapp verpasst, sieht die nächste gute. Ist man zu Fuß fast gleich schnell, steht das statt der Liste.
 - **Rad + Öffis (Bike & Ride):** mit dem eigenen Rad zur Haltestelle, dort parken, weiter mit Öffis. Gezeigt nur, wenn es mindestens 5 Minuten (bzw. 15 %) schneller ist als nur Öffis und als die ganze Strecke mit dem Rad; sonst sagt die Liste, was schneller ist.
+- **Ziele speichern:** Der Stern neben „Where to?“ speichert ein Ziel. Ohne Suche stehen links die gespeicherten (eigene Namen wie „Arbeit“, Reihenfolge und Entfernen über „Edit“) und die letzten 6 Ziele – jedes mit Stern zum Speichern und ✕ zum Entfernen, „Clear“ leert die Liste (mit „Undo“).
 - **Autorouten zur Wahl:** die schnellste und bis zu zwei Alternativen, die höchstens 5 Minuten (bzw. 15 %) langsamer sind und großteils andere Straßen nehmen, jeweils mit „via“ und den anderen grau auf der Karte.
 - **Abfahrten:** der Fahrtverlauf jeder Abfahrt mit allen Halten. Welche Haltestelle zuerst kommt, legen Pfeile neben ihrem Namen fest – unter „Departures“ und in „Home & stops“.
 - **Live-Verkehr** für Autorouten mit einem eigenen, kostenlosen TomTom-Schlüssel (optional).
@@ -62,9 +63,9 @@ python3 ~/.local/bin/transit-tray.py --once     # einmal abfragen, Menü als Tex
 
 ## Daten und Datenschutz
 
-- Zuhause, Haltestellen, ihre Filter, letzte Ziele und der TomTom-Schlüssel stehen nur lokal in `~/.config/transit-tray/settings.json` (nur für dich lesbar), Kartenkacheln und der letzte Stand in `~/.cache/transit-tray`. Im Fenster steht der Schlüssel verdeckt; das Auge im Feld zeigt ihn.
+- Zuhause, Haltestellen, ihre Filter, gespeicherte und letzte Ziele und der TomTom-Schlüssel stehen nur lokal in `~/.config/transit-tray/settings.json` (nur für dich lesbar), Kartenkacheln und der letzte Stand in `~/.cache/transit-tray`. Im Fenster steht der Schlüssel verdeckt; das Auge im Feld zeigt ihn.
 - Abfragen gehen direkt an die Dienste oben; für Routen mit den Koordinaten von Start und Ziel.
-- Jede Anfrage trägt den User-Agent `transit-tray/3.2 (+https://github.com/magnusgoeppel/transit-tray)`. Transitous und die OpenStreetMap-Kacheln verlangen Name, Version und Kontakt. Wer eine geänderte Fassung weitergibt, trägt dort (`APP_URL` im Skript) die eigene Adresse ein.
+- Jede Anfrage trägt den User-Agent `transit-tray/3.3 (+https://github.com/magnusgoeppel/transit-tray)`. Transitous und die OpenStreetMap-Kacheln verlangen Name, Version und Kontakt. Wer eine geänderte Fassung weitergibt, trägt dort (`APP_URL` im Skript) die eigene Adresse ein.
 
 ## Rücksicht auf die Dienste
 
