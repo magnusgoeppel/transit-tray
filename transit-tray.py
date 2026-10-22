@@ -2006,6 +2006,10 @@ def hafas_trips(source, origin, destination, moment, arrive, context=None):
            "arrLocL": [hafas_place(destination) if source == "oebb" else coord_place(destination)],
            "outDate": local.strftime("%Y%m%d"), "outTime": local.strftime("%H%M%S"), "outFrwd": not arrive,
            "numF": TRIPS, "getPasslist": True, "getPolyline": True}
+    if source != "oebb":
+        # Die VAO plant sonst nach Fahrplan: Ein verspaeteter Zug, der laut Plan schon weg
+        # ist, fehlte in der Liste (die ÖBB rechnet von selbst mit Echtzeit).
+        req["getIST"] = True
     if context:
         req["ctxScr"] = context
     res = hafas_one(source, "TripSearch", req)
